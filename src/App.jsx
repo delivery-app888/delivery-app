@@ -156,20 +156,6 @@ export default function App() {
     const g = await lg(); if (g?.amount) setGoal(g.amount);
     const s = await ls(); if (s) setSettings({ ...defaultSettings(), ...s });
     let all = await la();
-    // Auto-generate demo data if empty - set directly to state
-    if (all.length === 0) {
-      try {
-        const demo = generateDemoLogs();
-        all = demo.logs;
-        setData(demo.todayLog);
-        setGoal(300000);
-        setJizoExplained(true);
-        // Skip tutorial for demo
-        setLoading(false);
-        setAllLogs(all);
-        return;
-      } catch (e) { console.error("Demo gen:", e); }
-    }
     setAllLogs(all.filter(l => l.date !== tds()));
     // Show tutorial on first launch
     try { const tutDone = await storage.get("tutorial-done"); if (!tutDone) setTutorial(true); } catch { setTutorial(true); }
@@ -1166,28 +1152,6 @@ export default function App() {
           <div style={rowLast}>
             <div style={{ flex: 1, marginRight: 12 }}><div style={{ fontSize: sz(14), fontWeight: 600 }}>月間目標に含める</div><div style={{ fontSize: sz(11), color: T.textDim, lineHeight: 1.4 }}>月間目標の達成度の計算に<br/>インセンティブを含める</div></div>
             <Toggle on={settings.incInGoal} onToggle={() => updateSettings({ incInGoal: !settings.incInGoal })} T={T} />
-          </div>
-        </div>
-        {/* Dev tools */}
-        <div style={{ background: T.card, borderRadius: 14, padding: "4px 18px", border: `1px solid ${T.border}`, marginBottom: 16 }}>
-          <div style={{ fontSize: sz(12), color: T.textDim, fontWeight: 600, padding: "12px 0 4px", letterSpacing: 1 }}>データ</div>
-          <div style={{ padding: "10px 0" }}>
-            <button onClick={async (e) => {
-              const btn = e.currentTarget;
-              btn.textContent = "生成中...";
-              btn.disabled = true;
-              try {
-                const demo = generateDemoLogs();
-                setAllLogs(demo.logs);
-                setData(demo.todayLog);
-                setGoal(300000);
-                setPopup({ msg: "6ヶ月分のデモデータを\n生成しました\n\nメニュー → 分析で確認できます", onConfirm: () => setPopup(null) });
-              } catch (err) { console.error(err); }
-              btn.textContent = "デモデータを生成（6ヶ月分）";
-              btn.disabled = false;
-            }} style={{ width: "100%", height: 48, borderRadius: 10, border: "none", background: "#2563EB", color: "#FFF", fontSize: sz(14), fontWeight: 700, cursor: "pointer", fontFamily: FN, letterSpacing: 1 }}>
-              デモデータを生成（6ヶ月分）
-            </button>
           </div>
         </div>
         <div style={{ fontSize: sz(11), color: T.textFaint, textAlign: "center", marginTop: 30 }}>配達ログ v1.0</div>
