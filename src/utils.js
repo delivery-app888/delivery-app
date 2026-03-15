@@ -3,6 +3,7 @@ import { OT } from "./constants";
 
 // ─── Date/key helpers ───
 export const tds = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; };
+export const toLD = (ts) => { const d = new Date(ts); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; };
 export const ms = () => tds().slice(0, 7);
 const tk = () => `log:${tds()}`;
 const ik = () => "all-logs-index";
@@ -62,7 +63,7 @@ export const dc = (d) => (OT.find(o => o.id === d.orderType)?.c || 1);
 
 // ─── Data helpers ───
 export const newDay = () => ({ date: tds(), weather: null, sessions: [], breaks: [], deliveries: [], dailyIncentives: [], jizoSessions: [], currentSessionStart: null, currentBreakStart: null, currentOrderTime: null, currentJizoStart: null });
-export const defaultSettings = () => ({ theme: "dark", incInGoal: true, incInReward: false, largeFont: false });
+export const defaultSettings = () => ({ theme: "dark", incInGoal: true, incInReward: false, largeFont: false, workDays: [1, 2, 3, 4, 5] });
 
 export const migrate = (d) => {
   if (!d.dailyIncentives) d.dailyIncentives = [];

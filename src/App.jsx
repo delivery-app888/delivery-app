@@ -1,11 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid } from "recharts";
 import { storage } from "./db";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { DARK, LIGHT } from "./themes";
 import { WEATHER, COS, OT, NP, FN, BH, BBH } from "./constants";
-import { tds, ms, sv, lt, la, lg, sg, ls, ss, getPos, fetchWeather, ft, fd, fm, dc, newDay, defaultSettings, migrate, dayRev, reverseGeocode } from "./utils";
+import { tds, toLD, ms, sv, lt, la, lg, sg, ls, ss, getPos, fetchWeather, ft, fd, fm, dc, newDay, defaultSettings, migrate, dayRev, reverseGeocode } from "./utils";
 import { generateDemoLogs } from "./demoData";
 
 // ─── AutoFitText ───
@@ -96,6 +96,13 @@ export default function App() {
   const aaMapRef = useRef(null);
   const aaElRef = useRef(null);
   const aaLayerRef = useRef(null);
+  // high-value heatmap
+  const [hvCenter, setHvCenter] = useState(null);
+  const [hvMinRate, setHvMinRate] = useState(100);
+  const [hvPinCount, setHvPinCount] = useState(0);
+  const hvMapRef = useRef(null);
+  const hvElRef = useRef(null);
+  const hvLayerRef = useRef(null);
   // hourly analysis
   const [hrPeriod, setHrPeriod] = useState("today");
   const [hrDow, setHrDow] = useState("all");
@@ -121,17 +128,17 @@ export default function App() {
   const [upCompany, setUpCompany] = useState("all");
   const [upWeather, setUpWeather] = useState("all");
   const [upDropdown, setUpDropdown] = useState(null);
-  const [chartAnim, setChartAnim] = useState(true);
   const prevScreen = useRef(screen);
   useEffect(() => {
     if (screen !== prevScreen.current) {
-      if (screen === "ana_heatmap") { getPos().then(p => { if (p) setHmCenter([p.lat, p.lng]); }); setHmPeriod("today"); setHmTimeSlot("all"); setHmDow("all"); setHmCompany("all"); setHmWeather("all"); setHmDropdown(null); }
-      if (screen === "ana_area") { getPos().then(p => { if (p) setAaCenter([p.lat, p.lng]); }); setAaPeriod("all"); setAaTimeSlot("all"); setAaDow("all"); setAaCompany("all"); setAaWeather("all"); setAaDropdown(null); }
+      if (screen === "ana_heatmap") { setHmCenter(null); getPos().then(p => { if (p) setHmCenter([p.lat, p.lng]); }); setHmPeriod("today"); setHmTimeSlot("all"); setHmDow("all"); setHmCompany("all"); setHmWeather("all"); setHmDropdown(null); }
+      if (screen === "ana_area") { setAaCenter(null); getPos().then(p => { if (p) setAaCenter([p.lat, p.lng]); }); setAaPeriod("all"); setAaTimeSlot("all"); setAaDow("all"); setAaCompany("all"); setAaWeather("all"); setAaDropdown(null); }
+      if (screen === "ana_highvalue") { setHvCenter(null); getPos().then(p => { if (p) setHvCenter([p.lat, p.lng]); }); setHvMinRate(100); }
       if (screen === "ana_hourly") { setHrPeriod("today"); setHrDow("all"); setHrCompany("all"); setHrWeather("all"); setHrDropdown(null); }
       if (screen === "ana_weekday") { setWdPeriod("today"); setWdTimeSlot("all"); setWdCompany("all"); setWdWeather("all"); setWdDropdown(null); }
       if (screen === "ana_company") { setCoPeriod("today"); setCoTimeSlot("all"); setCoDow("all"); setCoWeather("all"); setCoDropdown(null); }
       if (screen === "ana_unitprice") { setUpPeriod("today"); setUpTimeSlot("all"); setUpDow("all"); setUpCompany("all"); setUpWeather("all"); setUpDropdown(null); }
-      if (screen.startsWith("ana_")) { setChartAnim(true); const t = setTimeout(() => setChartAnim(false), 1500); prevScreen.current = screen; return () => clearTimeout(t); }
+      if (screen === "history") { setHistDetail(null); setHistExpanded({}); }
       prevScreen.current = screen;
     }
   }, [screen]);
@@ -144,16 +151,20 @@ export default function App() {
   const [milestone, setMilestone] = useState(null);
   const [deliveryFeedback, setDeliveryFeedback] = useState(null);
   const [calOpen, setCalOpen] = useState(false);
+  const [calMonth, setCalMonth] = useState(() => { const n = new Date(); return { year: n.getFullYear(), month: n.getMonth() }; });
+  // History
+  const [histDetail, setHistDetail] = useState(null);
+  const [histExpanded, setHistExpanded] = useState({});
 
 
   const T = settings.theme === "light" ? LIGHT : DARK;
   // Font scale: large mode bumps small text to minimum 13px
   const sz = (n) => settings.largeFont ? (n < 12 ? 13 : n < 18 ? n + 3 : n < 24 ? n + 2 : n + 1) : n;
 
-  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 10000); return () => clearInterval(t); }, []);
+  useEffect(() => { if (screen.startsWith("ana_")) return; const t = setInterval(() => setNow(Date.now()), 10000); return () => clearInterval(t); }, [screen]);
   useEffect(() => { (async () => {
     const saved = await lt(); if (saved) setData(migrate(saved));
-    const g = await lg(); if (g?.amount) setGoal(g.amount);
+    const g = await lg(); if (g?.amount) { const curMonth = ms(); if (!g.month || g.month === curMonth) setGoal(g.amount); }
     const s = await ls(); if (s) setSettings({ ...defaultSettings(), ...s });
     let all = await la();
     setAllLogs(all.filter(l => l.date !== tds()));
@@ -181,13 +192,18 @@ export default function App() {
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
     hmMapRef.current = map;
     hmLayerRef.current = L.layerGroup().addTo(map);
+    // Current location marker
+    if (hmCenter) {
+      const locIcon = L.divIcon({ className: "", html: '<div style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;"><div style="position:absolute;width:40px;height:40px;border-radius:50%;background:#4285F433;animation:loc-ripple 2s ease-out infinite;"></div><div style="position:absolute;width:28px;height:28px;border-radius:50%;background:#4285F422;animation:loc-ripple 2s ease-out 0.6s infinite;"></div><div style="position:relative;width:16px;height:16px;background:#4285F4;border:3px solid #fff;border-radius:50%;box-shadow:0 0 8px #4285F466;z-index:1;"></div></div><style>@keyframes loc-ripple{0%{transform:scale(0.5);opacity:1}100%{transform:scale(1.8);opacity:0}}</style>', iconSize: [40, 40], iconAnchor: [20, 20] });
+      L.marker(hmCenter, { icon: locIcon, zIndexOffset: 1000 }).bindPopup("現在地").addTo(map);
+    }
     setTimeout(() => map.invalidateSize(), 200);
   }, [screen, hmCenter]);
 
   useEffect(() => {
     if (hmMapRef.current && hmCenter) {
-      hmMapRef.current.setView(hmCenter, 14);
-      setTimeout(() => hmMapRef.current.invalidateSize(), 100);
+      hmMapRef.current.setView(hmCenter, 14, { animate: true });
+      setTimeout(() => { if (hmMapRef.current) hmMapRef.current.invalidateSize(); }, 200);
     }
   }, [hmCenter]);
 
@@ -198,8 +214,8 @@ export default function App() {
     const nowMs2 = Date.now();
     const msDay2 = 86400000;
     const awD = [
-      ...allLogs.flatMap(l2 => (l2.deliveries || []).filter(d2 => d2.startLat || d2.endLat).map(d2 => ({ ...d2, _date: l2.date }))),
-      ...data.deliveries.filter(d2 => d2.startLat || d2.endLat).map(d2 => ({ ...d2, _date: data.date })),
+      ...allLogs.flatMap(l2 => (l2.deliveries || []).filter(d2 => d2.startLat).map(d2 => ({ ...d2, _date: l2.date }))),
+      ...data.deliveries.filter(d2 => d2.startLat).map(d2 => ({ ...d2, _date: data.date })),
     ];
     // Period filter
     const per = hmPeriod || "today";
@@ -248,11 +264,66 @@ export default function App() {
       const co2 = d2.company || "不明";
       const rw2 = d2.cancelled ? "キャンセル" : `¥${(d2.reward || 0).toLocaleString()}`;
       const wInfo = d2.apiWeather ? `<br/>${d2.apiWeather.temperature}℃ 風${d2.apiWeather.windspeed}km/h${d2.apiWeather.precipitation != null ? ` 雨${d2.apiWeather.precipitation}mm` : ""}` : "";
-      if (d2.startLat && d2.startLng) L.circleMarker([d2.startLat, d2.startLng], { radius: 6, color: c, fillColor: c, fillOpacity: 0.6, weight: 2 }).bindPopup(`<b>受注</b> ${fT(d2.orderTime)}<br/>${co2} ${rw2}${wInfo}`).addTo(hmLayerRef.current);
-      if (d2.endLat && d2.endLng) L.circleMarker([d2.endLat, d2.endLng], { radius: 6, color: c, fillColor: c, fillOpacity: 1, weight: 2 }).bindPopup(`<b>完了</b> ${fT(d2.completeTime)}<br/>${co2} ${rw2}${wInfo}`).addTo(hmLayerRef.current);
+      if (d2.startLat && d2.startLng) L.circleMarker([d2.startLat, d2.startLng], { radius: 6, color: c, fillColor: c, fillOpacity: 0.7, weight: 2 }).bindPopup(`<b>受注</b> ${fT(d2.orderTime)}<br/>${co2} ${rw2}${wInfo}`).addTo(hmLayerRef.current);
     });
     setHmPinCount(filt.length);
   }, [screen, hmPeriod, hmTimeSlot, hmDow, hmCompany, hmWeather, allLogs, data, isPremium]);
+
+  // ─── High-value heatmap lifecycle ───
+  useEffect(() => {
+    const isHv = screen === "ana_highvalue";
+    if (!isHv) {
+      if (hvMapRef.current) { hvMapRef.current.remove(); hvMapRef.current = null; }
+      return;
+    }
+    const el = hvElRef.current;
+    if (!el || hvMapRef.current) return;
+    const center = hvCenter || [35.6812, 139.7671];
+    const map = L.map(el, { zoomControl: false, attributionControl: false }).setView(center, 13);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
+    hvMapRef.current = map;
+    hvLayerRef.current = L.layerGroup().addTo(map);
+    if (hvCenter) {
+      const locIcon = L.divIcon({ className: "", html: '<div style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;"><div style="position:absolute;width:40px;height:40px;border-radius:50%;background:#4285F433;animation:loc-ripple 2s ease-out infinite;"></div><div style="position:absolute;width:28px;height:28px;border-radius:50%;background:#4285F422;animation:loc-ripple 2s ease-out 0.6s infinite;"></div><div style="position:relative;width:16px;height:16px;background:#4285F4;border:3px solid #fff;border-radius:50%;box-shadow:0 0 8px #4285F466;z-index:1;"></div></div><style>@keyframes loc-ripple{0%{transform:scale(0.5);opacity:1}100%{transform:scale(1.8);opacity:0}}</style>', iconSize: [40, 40], iconAnchor: [20, 20] });
+      L.marker(hvCenter, { icon: locIcon, zIndexOffset: 1000 }).bindPopup("現在地").addTo(map);
+    }
+    setTimeout(() => map.invalidateSize(), 200);
+  }, [screen, hvCenter]);
+
+  useEffect(() => {
+    if (hvMapRef.current && hvCenter) {
+      hvMapRef.current.setView(hvCenter, 13, { animate: true });
+      setTimeout(() => { if (hvMapRef.current) hvMapRef.current.invalidateSize(); }, 200);
+    }
+  }, [hvCenter]);
+
+  useEffect(() => {
+    if (screen !== "ana_highvalue" || !hvLayerRef.current) return;
+    hvLayerRef.current.clearLayers();
+    const allD = [
+      ...allLogs.flatMap(l => (l.deliveries || []).filter(d2 => d2.startLat && !d2.cancelled).map(d2 => ({ ...d2, _date: l.date }))),
+      ...data.deliveries.filter(d2 => d2.startLat && !d2.cancelled).map(d2 => ({ ...d2, _date: data.date })),
+    ];
+    const RC = { 100: "#22C55E", 200: "#F59E0B", 300: "#EF4444" };
+    const color = RC[hvMinRate] || "#22C55E";
+    const filt = allD.filter(d2 => {
+      if (!d2.orderTime || !d2.completeTime) return false;
+      const durMin = (d2.completeTime - d2.orderTime) / 60000;
+      if (durMin <= 0) return false;
+      const perMin = (d2.reward || 0) / durMin;
+      return perMin >= hvMinRate;
+    });
+    const fT = (t2) => { if (!t2) return ""; const dt2 = new Date(t2); return `${dt2.getHours()}:${String(dt2.getMinutes()).padStart(2, "0")}`; };
+    filt.forEach(d2 => {
+      const durMin = (d2.completeTime - d2.orderTime) / 60000;
+      const perMin = Math.round((d2.reward || 0) / durMin);
+      const co2 = d2.company || "不明";
+      L.circleMarker([d2.startLat, d2.startLng], { radius: 7, color, fillColor: color, fillOpacity: 0.7, weight: 2 })
+        .bindPopup(`<b>¥${perMin}/分</b><br/>${co2} ¥${(d2.reward || 0).toLocaleString()}<br/>${fT(d2.orderTime)} (${Math.round(durMin)}分)<br/>${d2._date}`)
+        .addTo(hvLayerRef.current);
+    });
+    setHvPinCount(filt.length);
+  }, [screen, hvMinRate, allLogs, data]);
 
   // ─── Area analysis: compute best area center from data ───
   const aaBestCenter = (() => {
@@ -289,14 +360,18 @@ export default function App() {
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
     aaMapRef.current = map;
     aaLayerRef.current = L.layerGroup().addTo(map);
+    if (aaCenter) {
+      const locIcon = L.divIcon({ className: "", html: '<div style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;"><div style="position:absolute;width:40px;height:40px;border-radius:50%;background:#4285F433;animation:loc-ripple 2s ease-out infinite;"></div><div style="position:absolute;width:28px;height:28px;border-radius:50%;background:#4285F422;animation:loc-ripple 2s ease-out 0.6s infinite;"></div><div style="position:relative;width:16px;height:16px;background:#4285F4;border:3px solid #fff;border-radius:50%;box-shadow:0 0 8px #4285F466;z-index:1;"></div></div><style>@keyframes loc-ripple{0%{transform:scale(0.5);opacity:1}100%{transform:scale(1.8);opacity:0}}</style>', iconSize: [40, 40], iconAnchor: [20, 20] });
+      L.marker(aaCenter, { icon: locIcon, zIndexOffset: 1000 }).bindPopup("現在地").addTo(map);
+    }
     setTimeout(() => map.invalidateSize(), 300);
     setTimeout(() => map.invalidateSize(), 600);
   }, [screen, aaCenter, aaBestCenter]);
 
   useEffect(() => {
     if (aaMapRef.current && aaCenter) {
-      aaMapRef.current.setView(aaCenter, 14);
-      setTimeout(() => aaMapRef.current.invalidateSize(), 100);
+      aaMapRef.current.setView(aaCenter, 14, { animate: true });
+      setTimeout(() => { if (aaMapRef.current) aaMapRef.current.invalidateSize(); }, 200);
     }
   }, [aaCenter]);
 
@@ -501,7 +576,19 @@ export default function App() {
   const flashBtn = (bg, dis, h, _name) => btn(bg, dis, h);
 
   // ─── Daily target for guide ───
-  const dailyTarget = goal > 0 ? Math.round(goal / 22) : 0; // assume ~22 work days
+  const dailyTarget = goal > 0 ? (() => {
+    const today = new Date();
+    const lastDay = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
+    const wd = settings.workDays || [1, 2, 3, 4, 5];
+    let workDaysLeft = 0;
+    for (let d = today.getDate(); d <= lastDay; d++) {
+      const dow = new Date(today.getFullYear(), today.getMonth(), d).getDay();
+      if (wd.includes(dow)) workDaysLeft++;
+    }
+    if (workDaysLeft <= 0) workDaysLeft = 1;
+    const remainingGoal = Math.max(0, goal - pastRev);
+    return Math.round(remainingGoal / workDaysLeft);
+  })() : 0;
   const todayRemaining = Math.max(0, dailyTarget - totAll);
 
   // ─── 1. Golden Time indicator (historical hourly earnings) ───
@@ -671,14 +758,17 @@ export default function App() {
     setPopup({
       msg: "本日の稼働を終了しますか？\n\n休憩の場合は「休憩開始」を\n使ってください。",
       onConfirm: () => {
-        // Capture stats before ending
-        const endSesMs = sesMs + (Date.now() - (data.currentSessionStart || Date.now()));
+        // Capture stats before ending — recalculate with real-time now
+        const realNow = Date.now();
+        const endSesMs = data.sessions.reduce((s, x) => s + (x.end - x.start), 0) + (data.currentSessionStart ? realNow - data.currentSessionStart : 0);
+        const endBrkMs = data.breaks.reduce((s, b) => (b.start && b.end) ? s + (b.end - b.start) : s, 0) + (data.currentBreakStart ? realNow - data.currentBreakStart : 0);
+        const endWkMs = Math.max(0, endSesMs - endBrkMs);
         const endDelCnt = delCnt;
         const endRew = totRew;
         const endInc = totInc;
         const endAll = totAll;
-        const endHrBase = endSesMs > 0 ? Math.round(endRew / (endSesMs / 3600000)) : 0;
-        const endHrAll = endSesMs > 0 ? Math.round(endAll / (endSesMs / 3600000)) : 0;
+        const endHrBase = endWkMs > 0 ? Math.round(endRew / (endWkMs / 3600000)) : 0;
+        const endHrAll = endWkMs > 0 ? Math.round(endAll / (endWkMs / 3600000)) : 0;
         // Find personal best
         const pastBest = allLogs.reduce((best, l) => {
           const r = (l.deliveries || []).filter(d2 => !d2.cancelled).reduce((s, d2) => s + (d2.reward || 0) + (d2.incentive || 0), 0) + (l.dailyIncentives || []).reduce((s, d2) => s + (d2.amount || 0), 0);
@@ -693,7 +783,7 @@ export default function App() {
         });
         setPopup(null);
         // Show otsukare card
-        setOtsukareData({ delCnt: endDelCnt, revenue: endRew, incentive: endInc, total: endAll, hrBase: endHrBase, hrAll: endHrAll, workTime: endSesMs, isNewBest, streak: streak });
+        setOtsukareData({ delCnt: endDelCnt, revenue: endRew, incentive: endInc, total: endAll, hrBase: endHrBase, hrAll: endHrAll, workTime: endWkMs, isNewBest, streak: streak });
       }
     });
   };
@@ -778,7 +868,7 @@ export default function App() {
       const consec = recentDels.filter(d => d.completeTime > (lastBreak || 0)).length + 1;
       if (consec >= 5 && !fb) fb = { icon: "🔥", msg: `連続${consec}件！`, detail: "集中力が続いています", color: "#F59E0B" };
     }
-    if (fb) { setDeliveryFeedback(fb); setTimeout(() => setDeliveryFeedback(null), 2500); }
+    if (fb) { setDeliveryFeedback(fb); setTimeout(() => setDeliveryFeedback(null), 4000); }
 
     // ─── Milestone check ───
     const cumAfter = cumDels + (rwType === "double" ? 2 : rwType === "triple" ? 3 : 1);
@@ -846,12 +936,12 @@ export default function App() {
   const openEdit = (i) => { setEditIdx(i); setEditData({ ...data.deliveries[i] }); setEditField(null); setScreen("edit"); };
   const svEdit = () => { if (editIdx === null) return; update(d => { d.deliveries[editIdx] = { ...editData }; }); setScreen("main"); };
   const delEdit = () => { setPopup({ msg: "この記録を削除？", onConfirm: () => { update(d => { d.deliveries.splice(editIdx, 1); }); setPopup(null); setScreen("main"); } }); };
-  const doGoalSave = () => { const a = parseInt(goalInput, 10) || 0; setGoal(a); sg({ amount: a }); setGoalModal(false); };
+  const doGoalSave = () => { const a = parseInt(goalInput, 10) || 0; setGoal(a); sg({ amount: a, month: ms() }); setGoalModal(false); };
 
-  if (loading) return <div style={{ fontFamily: FN, background: T.bg, color: T.textDim, height: "100vh", display: "flex", alignItems: "center", justifyContent: "center" }}>読み込み中...</div>;
+  if (loading) return <div style={{ fontFamily: FN, background: T.bg, color: T.textDim, height: "100dvh", display: "flex", alignItems: "center", justifyContent: "center" }}>読み込み中...</div>;
 
   // ─── Shared ───
-  const ov = { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: T.overlay, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-start", zIndex: 100, paddingTop: 32, overflowY: "auto", fontFamily: FN, color: T.text };
+  const ov = { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: T.overlay, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-start", zIndex: 100, paddingTop: 14, overflowY: "auto", fontFamily: FN, color: T.text };
   const canB = { background: "none", border: "none", color: T.textMuted, fontSize: sz(13), cursor: "pointer", marginTop: 10, fontFamily: FN };
   const cB = (bg, sel) => ({ width: 58, height: 58, borderRadius: 13, border: sel ? `3px solid ${T.text}` : "2px solid transparent", background: sel ? (T === LIGHT ? "#F0F0F0" : "#111") : bg, color: "#FFF", fontSize: sz(24), fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", fontFamily: FN, boxShadow: sel ? `0 0 12px ${bg}66` : "none" });
   const npG = { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, width: "100%", maxWidth: 270, marginBottom: 12 };
@@ -904,6 +994,7 @@ export default function App() {
   const anaItems = [
     { key: "daily", label: "📋 デイリーレポート", free: true },
     { key: "heatmap", label: "📍 注文ヒートマップ", free: true },
+    { key: "highvalue", label: "💎 高単価配達マップ", free: true },
     { key: "hourly", label: "⏰ 時間帯分析", free: true },
     { key: "area", label: "🗺️ エリア別分析", free: false },
     { key: "condition", label: "🌡️ 気象コンディション分析", free: false },
@@ -928,6 +1019,7 @@ export default function App() {
         ))}
         {/* Other menu items */}
         {[
+          { label: "📋  配達履歴", fn: () => { setMenu(false); setScreen("history"); } },
           { label: "🎯  月間目標", fn: () => { setMenu(false); setGoalInput(goal ? String(goal) : ""); setGoalModal(true); } },
           { label: "⚙️  設定", fn: () => { setMenu(false); setScreen("settings"); } },
           { label: "🔄  リセット", fn: doReset, danger: true },
@@ -980,23 +1072,23 @@ export default function App() {
     const av = rwField === "reward" ? rwAmt : rwInc;
     const st = rwField === "reward" ? setRwAmt : setRwInc;
     return (<div style={ov}>{PopupEl}
-      <div style={{ fontSize: sz(13), color: T.textMuted, marginBottom: 12, letterSpacing: 2, fontWeight: 600 }}>報酬入力</div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 12, maxWidth: 270, width: "100%" }}>
-        {OT.map(t => (<button key={t.id} onClick={() => setRwType(t.id)} style={{ flex: 1, height: 36, borderRadius: 8, border: rwType === t.id ? `2px solid ${T.accent}` : `1.5px solid ${T.borderLight}`, background: rwType === t.id ? `${T.accent}20` : T.card, color: rwType === t.id ? T.accent : T.textMuted, fontSize: sz(12), fontWeight: 600, cursor: "pointer", fontFamily: FN }}>{t.label}</button>))}
+      <div style={{ fontSize: sz(14), color: T.textMuted, marginBottom: 8, letterSpacing: 2, fontWeight: 600 }}>報酬入力</div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10, maxWidth: 320, width: "100%", padding: "0 10px" }}>
+        {OT.map(t => (<button key={t.id} onClick={() => setRwType(t.id)} style={{ flex: 1, height: 40, borderRadius: 9, border: rwType === t.id ? `2px solid ${T.accent}` : `1.5px solid ${T.borderLight}`, background: rwType === t.id ? `${T.accent}20` : T.card, color: rwType === t.id ? T.accent : T.textMuted, fontSize: sz(13), fontWeight: 600, cursor: "pointer", fontFamily: FN }}>{t.label}</button>))}
       </div>
-      <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>{COS.map(c => <button key={c.id} style={cB(c.bg, rwCo === c.id)} onClick={() => setRwCo(c.id)}>{c.letter}</button>)}</div>
-      <div style={{ fontSize: sz(11), color: T.textMuted, marginBottom: 14, height: 14 }}>{rwCo ? COS.find(c => c.id === rwCo)?.name : "会社を選択"}</div>
-      <div style={{ display: "flex", gap: 0, marginBottom: 10, maxWidth: 270, width: "100%" }}>
+      <div style={{ display: "flex", gap: 10, marginBottom: 6 }}>{COS.map(c => <button key={c.id} style={cB(c.bg, rwCo === c.id)} onClick={() => setRwCo(c.id)}>{c.letter}</button>)}</div>
+      <div style={{ fontSize: sz(11), color: T.textMuted, marginBottom: 10, height: 14 }}>{rwCo ? COS.find(c => c.id === rwCo)?.name : "会社を選択"}</div>
+      <div style={{ display: "flex", gap: 0, marginBottom: 8, maxWidth: 320, width: "100%", padding: "0 10px" }}>
         {[{ k: "reward", l: "配達報酬" }, { k: "incentive", l: "インセンティブ" }].map(f => (
-          <button key={f.k} onClick={() => setRwField(f.k)} style={{ flex: 1, padding: "7px 0", border: "none", cursor: "pointer", background: rwField === f.k ? (f.k === "reward" ? T.accent : "#7C3AED") : T.inputBg, color: rwField === f.k ? "#FFF" : T.textDim, fontWeight: rwField === f.k ? 700 : 400, fontSize: sz(12), fontFamily: FN, borderRadius: f.k === "reward" ? "9px 0 0 9px" : "0 9px 9px 0" }}>{f.l}</button>
+          <button key={f.k} onClick={() => setRwField(f.k)} style={{ flex: 1, padding: "9px 0", border: "none", cursor: "pointer", background: rwField === f.k ? (f.k === "reward" ? T.accent : "#7C3AED") : T.inputBg, color: rwField === f.k ? "#FFF" : T.textDim, fontWeight: rwField === f.k ? 700 : 400, fontSize: sz(13), fontFamily: FN, borderRadius: f.k === "reward" ? "9px 0 0 9px" : "0 9px 9px 0" }}>{f.l}</button>
         ))}
       </div>
-      <div style={{ fontSize: sz(38), fontWeight: 800, color: rwField === "incentive" ? T.purple : T.text, textAlign: "center", marginBottom: 2, minHeight: 46 }}>{av ? `¥${Number(av).toLocaleString()}` : <span style={{ color: T.textFaint }}>例：650</span>}</div>
-      <div style={{ display: "flex", gap: 20, marginBottom: 10 }}>
+      <div style={{ fontSize: sz(36), fontWeight: 800, color: rwField === "incentive" ? T.purple : T.text, textAlign: "center", marginBottom: 2, minHeight: 42 }}>{av ? `¥${Number(av).toLocaleString()}` : <span style={{ color: T.textFaint }}>例：650</span>}</div>
+      <div style={{ display: "flex", gap: 20, marginBottom: 8 }}>
         <div style={{ textAlign: "center" }}><div style={{ fontSize: sz(9), color: T.textDim }}>報酬</div><div style={{ fontSize: sz(14), fontWeight: 700, color: rwAmt ? T.text : T.textFaint }}>¥{rwAmt ? Number(rwAmt).toLocaleString() : "0"}</div></div>
         <div style={{ textAlign: "center" }}><div style={{ fontSize: sz(9), color: T.textDim }}>インセンティブ</div><div style={{ fontSize: sz(14), fontWeight: 700, color: rwInc ? T.purple : T.textFaint }}>¥{rwInc ? Number(rwInc).toLocaleString() : "0"}</div></div>
       </div>
-      <div style={npG}>{NP.map(k => <button key={k} style={npK} onClick={() => npF(k, st)}>{k}</button>)}</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, width: "100%", maxWidth: 320, marginBottom: 8, padding: "0 10px" }}>{NP.map(k => <button key={k} style={{ height: 48, borderRadius: 10, border: `1px solid ${T.borderLight}`, background: T.card, color: T.text, fontSize: sz(20), fontWeight: 600, cursor: "pointer", fontFamily: FN }} onClick={() => npF(k, st)}>{k}</button>)}</div>
 
       {/* Rating buttons */}
       {(() => {
@@ -1010,8 +1102,8 @@ export default function App() {
           { id: "bad", label: "悪い", icon: "🔵", color: "#3B82F6" },
         ];
         return (
-          <div style={{ width: "100%", maxWidth: 270, marginBottom: 12 }}>
-            <div style={{ fontSize: sz(10), color: T.textDim, marginBottom: 6, textAlign: "center" }}>
+          <div style={{ width: "100%", maxWidth: 320, marginBottom: 8, padding: "0 10px" }}>
+            <div style={{ fontSize: sz(10), color: T.textDim, marginBottom: 5, textAlign: "center" }}>
               配達評価{!rwRating && rwAmt ? "（自動判定）" : rwRating ? "（手動）" : ""}
             </div>
             <div style={{ display: "flex", gap: 6 }}>
@@ -1020,11 +1112,11 @@ export default function App() {
                 const isAuto = !rwRating && rwAmt && autoR === r.id;
                 return (
                   <button key={r.id} onClick={() => setRwRating(rwRating === r.id ? null : r.id)} style={{
-                    flex: 1, padding: "8px 0", borderRadius: 10,
+                    flex: 1, padding: "9px 0", borderRadius: 10,
                     border: isActive ? `2px solid ${r.color}` : `1.5px solid ${T.borderLight}`,
                     background: isActive ? `${r.color}18` : T.card,
                     color: isActive ? r.color : T.textDim,
-                    fontSize: sz(12), fontWeight: isActive ? 700 : 400,
+                    fontSize: sz(13), fontWeight: isActive ? 700 : 500,
                     cursor: "pointer", fontFamily: FN, textAlign: "center",
                     opacity: isAuto && !rwRating ? 0.7 : 1,
                   }}>
@@ -1033,14 +1125,16 @@ export default function App() {
                 );
               })}
             </div>
-            {!rwRating && rwAmt && <div style={{ fontSize: sz(9), color: T.textFaint, textAlign: "center", marginTop: 4 }}>タップで手動変更できます</div>}
+            {!rwRating && rwAmt && <div style={{ fontSize: sz(9), color: T.textFaint, textAlign: "center", marginTop: 3 }}>タップで手動変更できます</div>}
           </div>
         );
       })()}
 
-      <button style={okBt(!rwCo || !rwAmt)} onClick={doRwOk} disabled={!rwCo || !rwAmt}>OK</button>
-      <button onClick={doCkCan} style={{ width: "100%", maxWidth: 270, height: 42, borderRadius: 10, border: "1.5px solid #EF444444", background: T.card, color: "#EF4444", fontSize: sz(13), fontWeight: 600, cursor: "pointer", fontFamily: FN, marginTop: 10 }}>調理待ちキャンセル</button>
-      <button style={canB} onClick={() => setScreen("main")}>戻る</button>
+      <div style={{ width: "100%", maxWidth: 320, padding: "0 10px" }}>
+        <button style={{ ...okBt(!rwCo || !rwAmt), maxWidth: "100%", height: 52, fontSize: sz(17) }} onClick={doRwOk} disabled={!rwCo || !rwAmt}>OK</button>
+        <button onClick={doCkCan} style={{ width: "100%", height: 44, borderRadius: 10, border: "1.5px solid #EF444444", background: T.card, color: "#EF4444", fontSize: sz(14), fontWeight: 600, cursor: "pointer", fontFamily: FN, marginTop: 6 }}>調理待ちキャンセル</button>
+        <button onClick={() => setScreen("main")} style={{ width: "100%", height: 40, borderRadius: 10, border: `1.5px solid ${T.borderLight}`, background: "none", color: T.textMuted, fontSize: sz(14), fontWeight: 600, cursor: "pointer", fontFamily: FN, marginTop: 4 }}>戻る</button>
+      </div>
     </div>);
   }
 
@@ -1057,7 +1151,7 @@ export default function App() {
   // ═══ EDIT ═══
   if (screen === "edit" && editData) {
     const c = COS.find(cc => cc.id === editData.company);
-    if (editField) {
+    if (editField === "reward" || editField === "incentive") {
       const ev = editField === "reward" ? String(editData.reward || "") : String(editData.incentive || "");
       const enp = (k) => { const cur = ev; if (k === "⌫") { const nv = cur.slice(0, -1); editField === "reward" ? setEditData({ ...editData, reward: parseInt(nv, 10) || 0 }) : setEditData({ ...editData, incentive: parseInt(nv, 10) || 0 }); } else { const nv = cur === "0" ? k : cur + k; if (nv.length <= 7) editField === "reward" ? setEditData({ ...editData, reward: parseInt(nv, 10) || 0 }) : setEditData({ ...editData, incentive: parseInt(nv, 10) || 0 }); } };
       return (<div style={ov}><div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 12 }}>{editField === "reward" ? "配達報酬を編集" : "インセンティブを編集"}</div>
@@ -1066,56 +1160,71 @@ export default function App() {
         <button style={okBt(false)} onClick={() => setEditField(null)}>決定</button></div>);
     }
     return (<div style={ov}>{PopupEl}
-      <div style={{ fontSize: sz(13), color: T.textMuted, marginBottom: 16, letterSpacing: 2, fontWeight: 600 }}>配達詳細・編集</div>
-      <div style={{ width: "100%", maxWidth: 300, padding: "0 10px" }}>
-        <div style={{ background: T.card, borderRadius: 12, padding: 16, marginBottom: 12, border: `1px solid ${T.border}` }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-            <div style={{ width: 40, height: 40, borderRadius: 10, background: c?.bg || "#333", color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: sz(20), fontWeight: 800 }}>{c?.letter}</div>
-            <div><div style={{ fontSize: sz(14), fontWeight: 700, color: T.text }}>{c?.name}</div><div style={{ fontSize: sz(11), color: T.textMuted }}>{OT.find(o => o.id === editData.orderType)?.label}{editData.cancelled && <span style={{ color: "#EF4444" }}> キャンセル</span>}</div></div>
+      <div style={{ fontSize: sz(14), color: T.textMuted, marginBottom: 8, letterSpacing: 2, fontWeight: 600 }}>配達詳細・編集</div>
+      <div style={{ width: "100%", maxWidth: 340, padding: "0 10px" }}>
+        <div style={{ background: T.card, borderRadius: 14, padding: "14px 16px", marginBottom: 8, border: `1px solid ${T.border}` }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+            <div style={{ width: 40, height: 40, borderRadius: 10, background: c?.bg || "#333", color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: sz(19), fontWeight: 800 }}>{c?.letter}</div>
+            <div><div style={{ fontSize: sz(15), fontWeight: 700, color: T.text }}>{c?.name}</div><div style={{ fontSize: sz(12), color: T.textMuted }}>{OT.find(o => o.id === editData.orderType)?.label}{editData.cancelled && <span style={{ color: "#EF4444" }}> キャンセル</span>}</div></div>
           </div>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}><span style={{ fontSize: sz(11), color: T.textMuted }}>時間</span><span style={{ fontSize: sz(13), fontWeight: 600, color: T.text }}>{ft(editData.orderTime)}〜{ft(editData.completeTime)}</span></div>
-          <div onClick={() => setEditField("reward")} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderTop: `1px solid ${T.border}`, cursor: "pointer" }}><span style={{ fontSize: sz(12), color: T.textMuted }}>配達報酬</span><span style={{ fontSize: sz(16), fontWeight: 700, color: T.accent }}>¥{(editData.reward || 0).toLocaleString()} ✎</span></div>
-          <div onClick={() => setEditField("incentive")} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderTop: `1px solid ${T.border}`, cursor: "pointer" }}><span style={{ fontSize: sz(12), color: T.textMuted }}>インセンティブ</span><span style={{ fontSize: sz(16), fontWeight: 700, color: T.purple }}>¥{(editData.incentive || 0).toLocaleString()} ✎</span></div>
-          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 10 }}><div style={{ fontSize: sz(11), color: T.textMuted, marginBottom: 6 }}>会社</div><div style={{ display: "flex", gap: 8 }}>{COS.map(cc => (<button key={cc.id} onClick={() => setEditData({ ...editData, company: cc.id })} style={{ width: 40, height: 40, borderRadius: 10, border: editData.company === cc.id ? `2px solid ${T.text}` : `1.5px solid ${T.borderLight}`, background: editData.company === cc.id ? T.inputBg : cc.bg, color: "#FFF", fontSize: sz(16), fontWeight: 800, cursor: "pointer", fontFamily: FN }}>{cc.letter}</button>))}</div></div>
-          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 10, marginTop: 10 }}><div style={{ fontSize: sz(11), color: T.textMuted, marginBottom: 6 }}>タイプ</div><div style={{ display: "flex", gap: 6 }}>{OT.map(ot => (<button key={ot.id} onClick={() => setEditData({ ...editData, orderType: ot.id })} style={{ flex: 1, padding: "6px 0", borderRadius: 7, border: editData.orderType === ot.id ? `2px solid ${T.accent}` : `1.5px solid ${T.borderLight}`, background: editData.orderType === ot.id ? `${T.accent}20` : T.card, color: editData.orderType === ot.id ? T.accent : T.textMuted, fontSize: sz(11), fontWeight: 600, cursor: "pointer", fontFamily: FN }}>{ot.label}</button>))}</div></div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+            <span style={{ fontSize: sz(12), color: T.textMuted }}>時間</span>
+            {editField === "orderTime" || editField === "completeTime" ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <input type="time" value={editData.orderTime ? (() => { const d = new Date(editData.orderTime); return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; })() : ""} onChange={(e) => { if (!e.target.value) return; const [h, m] = e.target.value.split(":").map(Number); const d = new Date(editData.orderTime || Date.now()); d.setHours(h, m, 0, 0); setEditData({ ...editData, orderTime: d.getTime() }); }} style={{ background: T.inputBg, border: `1px solid ${T.accent}`, borderRadius: 6, color: T.text, fontSize: sz(13), padding: "4px 6px", fontFamily: FN, width: 80 }} />
+                <span style={{ color: T.textMuted }}>〜</span>
+                <input type="time" value={editData.completeTime ? (() => { const d = new Date(editData.completeTime); return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; })() : ""} onChange={(e) => { if (!e.target.value) return; const [h, m] = e.target.value.split(":").map(Number); const d = new Date(editData.completeTime || Date.now()); d.setHours(h, m, 0, 0); setEditData({ ...editData, completeTime: d.getTime() }); }} style={{ background: T.inputBg, border: `1px solid ${T.accent}`, borderRadius: 6, color: T.text, fontSize: sz(13), padding: "4px 6px", fontFamily: FN, width: 80 }} />
+                <button onClick={() => setEditField(null)} style={{ background: T.accent, color: "#000", border: "none", borderRadius: 6, fontSize: sz(11), fontWeight: 700, padding: "4px 8px", cursor: "pointer", fontFamily: FN }}>OK</button>
+              </div>
+            ) : (
+              <span onClick={() => setEditField("orderTime")} style={{ fontSize: sz(14), fontWeight: 600, color: T.text, cursor: "pointer" }}>{ft(editData.orderTime)}〜{ft(editData.completeTime)} ✎</span>
+            )}
+          </div>
+          {(() => { const dur = editData.completeTime && editData.orderTime ? editData.completeTime - editData.orderTime : 0; const durMin = dur > 0 ? dur / 60000 : 0; const perMin = durMin > 0 ? Math.round((editData.reward || 0) / durMin) : 0; return (<>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>所要時間</span><span style={{ fontSize: sz(14), fontWeight: 600, color: T.text }}>{fm(dur)}</span></div>
+            {perMin > 0 && !editData.cancelled && <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>分給</span><span style={{ fontSize: sz(15), fontWeight: 700, color: "#0EA5E9" }}>¥{perMin.toLocaleString()}/分</span></div>}
+          </>); })()}
+          <div onClick={() => setEditField("reward")} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}`, cursor: "pointer" }}><span style={{ fontSize: sz(13), color: T.textMuted }}>配達報酬</span><span style={{ fontSize: sz(17), fontWeight: 700, color: T.accent }}>¥{(editData.reward || 0).toLocaleString()} ✎</span></div>
+          <div onClick={() => setEditField("incentive")} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}`, cursor: "pointer" }}><span style={{ fontSize: sz(13), color: T.textMuted }}>インセンティブ</span><span style={{ fontSize: sz(17), fontWeight: 700, color: T.purple }}>¥{(editData.incentive || 0).toLocaleString()} ✎</span></div>
+          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8 }}><div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 5 }}>会社</div><div style={{ display: "flex", gap: 7 }}>{COS.map(cc => (<button key={cc.id} onClick={() => setEditData({ ...editData, company: cc.id })} style={{ width: 40, height: 40, borderRadius: 10, border: editData.company === cc.id ? `2px solid ${T.text}` : `1.5px solid ${T.borderLight}`, background: editData.company === cc.id ? T.inputBg : cc.bg, color: "#FFF", fontSize: sz(16), fontWeight: 800, cursor: "pointer", fontFamily: FN }}>{cc.letter}</button>))}</div></div>
+          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginTop: 8 }}><div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 5 }}>タイプ</div><div style={{ display: "flex", gap: 6 }}>{OT.map(ot => (<button key={ot.id} onClick={() => setEditData({ ...editData, orderType: ot.id })} style={{ flex: 1, padding: "6px 0", borderRadius: 7, border: editData.orderType === ot.id ? `2px solid ${T.accent}` : `1.5px solid ${T.borderLight}`, background: editData.orderType === ot.id ? `${T.accent}20` : T.card, color: editData.orderType === ot.id ? T.accent : T.textMuted, fontSize: sz(12), fontWeight: 600, cursor: "pointer", fontFamily: FN }}>{ot.label}</button>))}</div></div>
           {/* Rating */}
-          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 10, marginTop: 10 }}>
-            <div style={{ fontSize: sz(11), color: T.textMuted, marginBottom: 6 }}>配達評価</div>
+          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginTop: 8 }}>
+            <div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 5 }}>配達評価</div>
             <div style={{ display: "flex", gap: 6 }}>
               {[{ id: "good", label: "🟡 良い", color: "#EAB308" }, { id: "normal", label: "⚪ 普通", color: T.textMuted }, { id: "bad", label: "🔵 悪い", color: "#3B82F6" }].map(r => (
-                <button key={r.id} onClick={() => setEditData({ ...editData, rating: r.id })} style={{ flex: 1, padding: "6px 0", borderRadius: 7, border: editData.rating === r.id ? `2px solid ${r.color}` : `1.5px solid ${T.borderLight}`, background: editData.rating === r.id ? `${r.color}18` : T.card, color: editData.rating === r.id ? r.color : T.textDim, fontSize: sz(11), fontWeight: 600, cursor: "pointer", fontFamily: FN }}>{r.label}</button>
+                <button key={r.id} onClick={() => setEditData({ ...editData, rating: r.id })} style={{ flex: 1, padding: "6px 0", borderRadius: 7, border: editData.rating === r.id ? `2px solid ${r.color}` : `1.5px solid ${T.borderLight}`, background: editData.rating === r.id ? `${r.color}18` : T.card, color: editData.rating === r.id ? r.color : T.textDim, fontSize: sz(12), fontWeight: 600, cursor: "pointer", fontFamily: FN }}>{r.label}</button>
               ))}
             </div>
           </div>
           {/* API Weather */}
           {editData.apiWeather && (
-            <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 10, marginTop: 10 }}>
-              <div style={{ fontSize: sz(11), color: T.textMuted, marginBottom: 6 }}>取得天候データ</div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6 }}>
-                <div style={{ background: T.barBg, borderRadius: 8, padding: "8px 4px", textAlign: "center" }}>
+            <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginTop: 8 }}>
+              <div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 5 }}>取得天候データ</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 5 }}>
+                <div style={{ background: T.barBg, borderRadius: 7, padding: "6px 4px", textAlign: "center" }}>
                   <div style={{ fontSize: sz(9), color: T.textDim }}>天候</div>
                   <div style={{ fontSize: sz(15), fontWeight: 700, color: T.text }}>{WEATHER.find(w => w.id === editData.apiWeather.weatherId)?.icon || "?"}</div>
                 </div>
-                <div style={{ background: T.barBg, borderRadius: 8, padding: "8px 4px", textAlign: "center" }}>
+                <div style={{ background: T.barBg, borderRadius: 7, padding: "6px 4px", textAlign: "center" }}>
                   <div style={{ fontSize: sz(9), color: T.textDim }}>気温</div>
-                  <div style={{ fontSize: sz(14), fontWeight: 700, color: T.text }}>{editData.apiWeather.temperature}℃</div>
+                  <div style={{ fontSize: sz(13), fontWeight: 700, color: T.text }}>{editData.apiWeather.temperature}℃</div>
                 </div>
-                <div style={{ background: T.barBg, borderRadius: 8, padding: "8px 4px", textAlign: "center" }}>
+                <div style={{ background: T.barBg, borderRadius: 7, padding: "6px 4px", textAlign: "center" }}>
                   <div style={{ fontSize: sz(9), color: T.textDim }}>風速</div>
-                  <div style={{ fontSize: sz(14), fontWeight: 700, color: T.text }}>{editData.apiWeather.windspeed}<span style={{ fontSize: sz(8) }}>km/h</span></div>
+                  <div style={{ fontSize: sz(13), fontWeight: 700, color: T.text }}>{editData.apiWeather.windspeed}<span style={{ fontSize: sz(8) }}>km/h</span></div>
                 </div>
-                <div style={{ background: T.barBg, borderRadius: 8, padding: "8px 4px", textAlign: "center" }}>
+                <div style={{ background: T.barBg, borderRadius: 7, padding: "6px 4px", textAlign: "center" }}>
                   <div style={{ fontSize: sz(9), color: T.textDim }}>雨量</div>
-                  <div style={{ fontSize: sz(14), fontWeight: 700, color: T.text }}>{editData.apiWeather.precipitation != null ? editData.apiWeather.precipitation : "-"}<span style={{ fontSize: sz(8) }}>mm</span></div>
+                  <div style={{ fontSize: sz(13), fontWeight: 700, color: T.text }}>{editData.apiWeather.precipitation != null ? editData.apiWeather.precipitation : "-"}<span style={{ fontSize: sz(8) }}>mm</span></div>
                 </div>
               </div>
-              <div style={{ fontSize: sz(9), color: T.textFaint, marginTop: 4, textAlign: "right" }}>WMOコード: {editData.apiWeather.weathercode}</div>
             </div>
           )}
         </div>
-        <button onClick={svEdit} style={{ ...okBt(false), marginBottom: 8 }}>保存</button>
-        <button onClick={delEdit} style={{ width: "100%", maxWidth: 270, height: 42, borderRadius: 10, border: "1.5px solid #EF444444", background: T.card, color: "#EF4444", fontSize: sz(13), fontWeight: 600, cursor: "pointer", fontFamily: FN }}>削除</button>
-        <button style={canB} onClick={() => setScreen("main")}>戻る</button>
+        <button onClick={svEdit} style={{ ...okBt(false), maxWidth: "100%", height: 46, marginBottom: 5 }}>保存</button>
+        <button onClick={delEdit} style={{ width: "100%", height: 40, borderRadius: 10, border: "1.5px solid #EF444444", background: T.card, color: "#EF4444", fontSize: sz(13), fontWeight: 600, cursor: "pointer", fontFamily: FN }}>削除</button>
+        <button onClick={() => setScreen("main")} style={{ width: "100%", height: 36, borderRadius: 10, border: `1.5px solid ${T.borderLight}`, background: "none", color: T.textMuted, fontSize: sz(13), fontWeight: 600, cursor: "pointer", fontFamily: FN, marginTop: 3 }}>戻る</button>
       </div>
     </div>);
   }
@@ -1125,7 +1234,7 @@ export default function App() {
     const row = { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 0", borderBottom: `1px solid ${T.border}` };
     const rowLast = { ...row, borderBottom: "none" };
     return (
-      <div style={{ fontFamily: FN, background: T.bg, minHeight: "100vh", maxWidth: 430, margin: "0 auto", color: T.text, padding: "16px 20px" }}>
+      <div style={{ fontFamily: FN, background: T.bg, minHeight: "100dvh", maxWidth: 430, margin: "0 auto", color: T.text, padding: "16px 20px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
           <div style={{ fontSize: sz(18), fontWeight: 700 }}>⚙️ 設定</div>
           <button onClick={() => setScreen("main")} style={{ background: "none", border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.textSub, padding: "4px 12px", fontSize: sz(12), cursor: "pointer", fontFamily: FN }}>戻る</button>
@@ -1154,7 +1263,49 @@ export default function App() {
             <Toggle on={settings.incInGoal} onToggle={() => updateSettings({ incInGoal: !settings.incInGoal })} T={T} />
           </div>
         </div>
-        <div style={{ fontSize: sz(11), color: T.textFaint, textAlign: "center", marginTop: 30 }}>配達ログ v1.0</div>
+        {/* 稼働曜日設定 */}
+        <div style={{ background: T.card, borderRadius: 14, padding: "4px 18px 14px", border: `1px solid ${T.border}`, marginBottom: 16 }}>
+          <div style={{ fontSize: sz(12), color: T.textDim, fontWeight: 600, padding: "12px 0 4px", letterSpacing: 1 }}>稼働予定</div>
+          <div style={{ fontSize: sz(14), fontWeight: 600, marginBottom: 4 }}>稼働する曜日</div>
+          <div style={{ fontSize: sz(11), color: T.textDim, marginBottom: 12, lineHeight: 1.4 }}>日次目標の計算に使用します</div>
+          <div style={{ display: "flex", gap: 6, justifyContent: "center" }}>
+            {[
+              { day: 1, label: "月" }, { day: 2, label: "火" }, { day: 3, label: "水" },
+              { day: 4, label: "木" }, { day: 5, label: "金" }, { day: 6, label: "土" }, { day: 0, label: "日" }
+            ].map(({ day, label }) => {
+              const wd = settings.workDays || [1, 2, 3, 4, 5];
+              const sel = wd.includes(day);
+              return (
+                <button key={day} onClick={() => {
+                  const next = sel ? wd.filter(d => d !== day) : [...wd, day];
+                  if (next.length > 0) updateSettings({ workDays: next });
+                }} style={{
+                  width: 42, height: 42, borderRadius: 10,
+                  border: sel ? `2px solid ${T.accent}` : `1px solid ${T.borderLight}`,
+                  background: sel ? (T.accent + "22") : T.inputBg,
+                  color: sel ? T.accent : T.textMuted,
+                  fontSize: sz(14), fontWeight: sel ? 700 : 500,
+                  cursor: "pointer", fontFamily: FN,
+                  display: "flex", alignItems: "center", justifyContent: "center"
+                }}>{label}</button>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: sz(11), color: T.textMuted, textAlign: "center", marginTop: 8 }}>
+            週{(settings.workDays || [1, 2, 3, 4, 5]).length}日稼働
+          </div>
+        </div>
+        <div style={{ background: T.card, borderRadius: 14, padding: "12px 18px", border: `1px solid ${T.border}`, marginTop: 16 }}>
+          <div style={{ fontSize: sz(12), color: "#EF4444", fontWeight: 600, marginBottom: 6 }}>データについて</div>
+          <div style={{ fontSize: sz(11), color: T.textDim, lineHeight: 1.6 }}>配達データは端末のブラウザ内に保存されています。以下の操作でデータが消失します：</div>
+          <div style={{ fontSize: sz(11), color: T.textDim, lineHeight: 1.8, marginTop: 4, paddingLeft: 8 }}>
+            ・ブラウザの「Webサイトデータ」を削除<br/>
+            ・ホーム画面からアプリを削除<br/>
+            ・ブラウザの全データ消去
+          </div>
+          <div style={{ fontSize: sz(11), color: T.textDim, lineHeight: 1.6, marginTop: 6 }}>通常のアプリ更新ではデータは消えません。</div>
+        </div>
+        <div style={{ fontSize: sz(11), color: T.textFaint, textAlign: "center", marginTop: 20 }}>配達ログ v1.0</div>
       </div>
     );
   }
@@ -1184,7 +1335,7 @@ export default function App() {
 
   // Analysis page wrapper
   const AnaPage = ({ title, children, onClick }) => (
-    <div onClick={onClick} style={{ background: T.bg, minHeight: "100vh", padding: "14px 16px", maxWidth: 430, margin: "0 auto", fontFamily: FN, color: T.text, overflowY: "auto", height: "100vh" }}>
+    <div onClick={onClick} style={{ background: T.bg, minHeight: "100dvh", padding: "14px 16px", maxWidth: 430, margin: "0 auto", fontFamily: FN, color: T.text, overflowY: "auto", height: "100dvh" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
         <div style={{ fontSize: sz(17), fontWeight: 700 }}>{title}</div>
         <button style={{ background: "none", border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.textSub, padding: "4px 10px", fontSize: sz(12), cursor: "pointer", fontFamily: FN }} onClick={() => setScreen("main")}>戻る</button>
@@ -1205,13 +1356,10 @@ export default function App() {
     const todayInc = todayDels.reduce((s, d) => s + (d.incentive || 0), 0) + data.dailyIncentives.reduce((s, d) => s + (d.amount || 0), 0);
     const todayHB = wkMs > 0 ? Math.round(todayRev / (wkMs / 3600000)) : 0;
     const todayHA = wkMs > 0 ? Math.round((todayRev + todayInc) / (wkMs / 3600000)) : 0;
-    // Today hourly bar data
-    const todayHourly = [
-      { name: "0-3", min: 0, max: 3 }, { name: "3-6", min: 3, max: 6 }, { name: "6-9", min: 6, max: 9 }, { name: "9-12", min: 9, max: 12 },
-      { name: "12-15", min: 12, max: 15 }, { name: "15-18", min: 15, max: 18 }, { name: "18-21", min: 18, max: 21 }, { name: "21-24", min: 21, max: 24 },
-    ].map(b => {
-      const ds = todayDels.filter(d => { if (!d.orderTime) return false; const h = new Date(d.orderTime).getHours(); return h >= b.min && h < b.max; });
-      return { name: b.name, 件数: ds.reduce((s, d) => s + dc(d), 0) };
+    // Today hourly bar data (1-hour intervals)
+    const todayHourly = Array.from({ length: 24 }, (_, h) => {
+      const ds = todayDels.filter(d => d.orderTime && new Date(d.orderTime).getHours() === h);
+      return { name: `${h}`, 件数: ds.reduce((s, d) => s + dc(d), 0) };
     });
     // Today company pie data
     const todayPie = COS.map(c => {
@@ -1237,14 +1385,18 @@ export default function App() {
         {/* Today hourly bar chart */}
         <div style={aC}>
           <div style={aT2}>今日の時間帯別 配達件数</div>
-          <ResponsiveContainer width="100%" height={160}>
-            <BarChart data={todayHourly} margin={{ top: 4, right: 4, bottom: 0, left: -20 }}>
-              <XAxis dataKey="name" tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} allowDecimals={false} />
-              <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
-              <Bar isAnimationActive={chartAnim} dataKey="件数" fill={T.accent} radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
+          <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+            <div style={{ width: 700, height: 160 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={todayHourly} margin={{ top: 4, right: 4, bottom: 0, left: -20 }}>
+                  <XAxis dataKey="name" tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} interval={0} />
+                  <YAxis tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} allowDecimals={false} />
+                  <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
+                  <Bar isAnimationActive={false} dataKey="件数" fill={T.accent} radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
           {/* Premium tease */}
           <div onClick={() => !isPremium && setScreen("ana_hourly")} style={{ fontSize: sz(11), color: T.purple, marginTop: 8, cursor: "pointer" }}>
             過去30日の時間帯傾向と比較 →
@@ -1258,7 +1410,7 @@ export default function App() {
             <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
               <ResponsiveContainer width={120} height={120}>
                 <PieChart style={{ pointerEvents: "none" }}>
-                  <Pie isAnimationActive={chartAnim} data={todayPie} dataKey="value" cx="50%" cy="50%" outerRadius={50} innerRadius={25} paddingAngle={2} activeIndex={-1} activeShape={null}>
+                  <Pie isAnimationActive={false} data={todayPie} dataKey="value" cx="50%" cy="50%" outerRadius={50} innerRadius={25} paddingAngle={2} activeIndex={-1} activeShape={null}>
                     {todayPie.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
                   </Pie>
                 </PieChart>
@@ -1340,26 +1492,22 @@ export default function App() {
     const dowMap7 = { mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6, sun: 0 };
 
     let hrFiltered = anaAD;
-    if (hrPeriod === "today") hrFiltered = hrFiltered.filter(d => d.orderTime && new Date(d.orderTime).toISOString().slice(0,10) === todayDate);
-    else if (hrPeriod === "week") { const s = new Date(nowMs7 - 6 * msDay7).toISOString().slice(0,10); hrFiltered = hrFiltered.filter(d => d.orderTime && new Date(d.orderTime).toISOString().slice(0,10) >= s); }
-    else if (hrPeriod === "month") { const pf = todayDate.slice(0,7); hrFiltered = hrFiltered.filter(d => d.orderTime && new Date(d.orderTime).toISOString().slice(0,10).startsWith(pf)); }
-    else if (hrPeriod === "half") { const s = new Date(nowMs7 - 180 * msDay7).toISOString().slice(0,10); hrFiltered = hrFiltered.filter(d => d.orderTime && new Date(d.orderTime).toISOString().slice(0,10) >= s); }
+    if (hrPeriod === "today") hrFiltered = hrFiltered.filter(d => d.orderTime && toLD(d.orderTime) === todayDate);
+    else if (hrPeriod === "week") { const s = toLD(nowMs7 - 6 * msDay7); hrFiltered = hrFiltered.filter(d => d.orderTime && toLD(d.orderTime) >= s); }
+    else if (hrPeriod === "month") { const pf = todayDate.slice(0,7); hrFiltered = hrFiltered.filter(d => d.orderTime && toLD(d.orderTime).startsWith(pf)); }
+    else if (hrPeriod === "half") { const s = toLD(nowMs7 - 180 * msDay7); hrFiltered = hrFiltered.filter(d => d.orderTime && toLD(d.orderTime) >= s); }
     if (hrDow !== "all") hrFiltered = hrFiltered.filter(d => d.orderTime && new Date(d.orderTime).getDay() === dowMap7[hrDow]);
     if (hrCompany !== "all") hrFiltered = hrFiltered.filter(d => d.company === hrCompany);
     if (hrWeather !== "all") {
       const wxLogs3 = new Set(anaAll.filter(l => l.weather === hrWeather).map(l => l.date));
-      hrFiltered = hrFiltered.filter(d => d.orderTime && wxLogs3.has(new Date(d.orderTime).toISOString().slice(0,10)));
+      hrFiltered = hrFiltered.filter(d => d.orderTime && wxLogs3.has(toLD(d.orderTime)));
     }
 
-    const brackets = [
-      { name: "0-3", min: 0, max: 3 }, { name: "3-6", min: 3, max: 6 }, { name: "6-9", min: 6, max: 9 }, { name: "9-12", min: 9, max: 12 },
-      { name: "12-15", min: 12, max: 15 }, { name: "15-18", min: 15, max: 18 }, { name: "18-21", min: 18, max: 21 }, { name: "21-24", min: 21, max: 24 },
-    ];
-    const hData = brackets.map(b => {
-      const ds = hrFiltered.filter(d => { if (!d.orderTime) return false; const h = new Date(d.orderTime).getHours(); return h >= b.min && h < b.max; });
+    const hData = Array.from({ length: 24 }, (_, h) => {
+      const ds = hrFiltered.filter(d => d.orderTime && new Date(d.orderTime).getHours() === h);
       const cnt = ds.reduce((s, d) => s + dc(d), 0);
       const rev = ds.reduce((s, d) => s + (d.reward || 0), 0);
-      return { name: b.name, 売上: rev, 件数: cnt, 単価: cnt > 0 ? Math.round(rev / cnt) : 0 };
+      return { name: `${h}`, 売上: rev, 件数: cnt, 単価: cnt > 0 ? Math.round(rev / cnt) : 0 };
     });
 
     const hrFilterBtn = (label, ddKey, isActive) => (
@@ -1417,29 +1565,37 @@ export default function App() {
           <div style={{ fontSize: sz(10), color: T.textDim, marginBottom: 8, textAlign: "right" }}>{hrFiltered.length}件のデータ</div>
           <div style={aC}>
             <div style={aT2}>時間帯別 売上</div>
-            <ResponsiveContainer width="100%" height={200}>
-              <BarChart data={hData} margin={{ top: 4, right: 4, bottom: 0, left: -10 }}>
-                <XAxis dataKey="name" tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: sz(9), fill: T.textDim }} axisLine={false} tickLine={false} />
-                <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
-                <Bar isAnimationActive={chartAnim} dataKey="売上" fill={T.accent} radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+              <div style={{ width: 700, height: 200 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={hData} margin={{ top: 4, right: 4, bottom: 0, left: -10 }}>
+                    <XAxis dataKey="name" tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} interval={0} />
+                    <YAxis tick={{ fontSize: sz(9), fill: T.textDim }} axisLine={false} tickLine={false} />
+                    <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
+                    <Bar isAnimationActive={false} dataKey="売上" fill={T.accent} radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
           </div>
           <div style={aC}>
             <div style={aT2}>時間帯別 平均単価</div>
-            <ResponsiveContainer width="100%" height={200}>
-              <BarChart data={hData} margin={{ top: 4, right: 4, bottom: 0, left: -10 }}>
-                <XAxis dataKey="name" tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: sz(9), fill: T.textDim }} axisLine={false} tickLine={false} />
-                <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
-                <Bar isAnimationActive={chartAnim} dataKey="単価" fill="#22C55E" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+              <div style={{ width: 700, height: 200 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={hData} margin={{ top: 4, right: 4, bottom: 0, left: -10 }}>
+                    <XAxis dataKey="name" tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} interval={0} />
+                    <YAxis tick={{ fontSize: sz(9), fill: T.textDim }} axisLine={false} tickLine={false} />
+                    <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
+                    <Bar isAnimationActive={false} dataKey="単価" fill="#22C55E" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
           </div>
           <div style={aC}>
             {hData.map((h, i) => (
-              <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: i < 7 ? `1px solid ${T.border}` : "none", opacity: h.件数 === 0 ? 0.35 : 1 }}>
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: i < 23 ? `1px solid ${T.border}` : "none", opacity: h.件数 === 0 ? 0.35 : 1 }}>
                 <span style={{ fontSize: sz(12), color: T.textSub, width: 50 }}>{h.name}時</span>
                 <span style={{ fontSize: sz(12), color: T.text }}>{h.件数}件</span>
                 <span style={{ fontSize: sz(12), fontWeight: 600, color: T.accent }}>¥{h.単価.toLocaleString()}/件</span>
@@ -1491,9 +1647,9 @@ export default function App() {
     // Filter anaAll logs by period and weather
     let wdLogs = [...anaAll];
     if (wdPeriod === "today") wdLogs = wdLogs.filter(l => l.date === todayDate);
-    else if (wdPeriod === "week") { const s = new Date(nowMs8 - 6 * msDay8).toISOString().slice(0,10); wdLogs = wdLogs.filter(l => l.date >= s); }
+    else if (wdPeriod === "week") { const s = toLD(nowMs8 - 6 * msDay8); wdLogs = wdLogs.filter(l => l.date >= s); }
     else if (wdPeriod === "month") { const pf = todayDate.slice(0,7); wdLogs = wdLogs.filter(l => l.date?.startsWith(pf)); }
-    else if (wdPeriod === "half") { const s = new Date(nowMs8 - 180 * msDay8).toISOString().slice(0,10); wdLogs = wdLogs.filter(l => l.date >= s); }
+    else if (wdPeriod === "half") { const s = toLD(nowMs8 - 180 * msDay8); wdLogs = wdLogs.filter(l => l.date >= s); }
     if (wdWeather !== "all") wdLogs = wdLogs.filter(l => l.weather === wdWeather);
 
     const DAYS = ["日", "月", "火", "水", "木", "金", "土"];
@@ -1568,7 +1724,7 @@ export default function App() {
                 <XAxis dataKey="name" tick={{ fontSize: sz(12), fill: T.textDim }} axisLine={false} tickLine={false} />
                 <YAxis tick={{ fontSize: sz(9), fill: T.textDim }} axisLine={false} tickLine={false} />
                 <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
-                <Bar isAnimationActive={chartAnim} dataKey="平均売上" radius={[4, 4, 0, 0]}>
+                <Bar isAnimationActive={false} dataKey="平均売上" radius={[4, 4, 0, 0]}>
                   {wdData.map((_, i) => <Cell key={i} fill={DAYCOLORS[i]} />)}
                 </Bar>
               </BarChart>
@@ -1628,10 +1784,10 @@ export default function App() {
 
     let coFiltered = anaAD;
     // period filter
-    if (coPeriod === "today") coFiltered = coFiltered.filter(d => d.orderTime && new Date(d.orderTime).toISOString().slice(0,10) === todayDate);
-    else if (coPeriod === "week") { const s = new Date(nowMs5 - 6 * msDay5).toISOString().slice(0,10); coFiltered = coFiltered.filter(d => d.orderTime && new Date(d.orderTime).toISOString().slice(0,10) >= s); }
-    else if (coPeriod === "month") { const pf = todayDate.slice(0,7); coFiltered = coFiltered.filter(d => d.orderTime && new Date(d.orderTime).toISOString().slice(0,10).startsWith(pf)); }
-    else if (coPeriod === "half") { const s = new Date(nowMs5 - 180 * msDay5).toISOString().slice(0,10); coFiltered = coFiltered.filter(d => d.orderTime && new Date(d.orderTime).toISOString().slice(0,10) >= s); }
+    if (coPeriod === "today") coFiltered = coFiltered.filter(d => d.orderTime && toLD(d.orderTime) === todayDate);
+    else if (coPeriod === "week") { const s = toLD(nowMs5 - 6 * msDay5); coFiltered = coFiltered.filter(d => d.orderTime && toLD(d.orderTime) >= s); }
+    else if (coPeriod === "month") { const pf = todayDate.slice(0,7); coFiltered = coFiltered.filter(d => d.orderTime && toLD(d.orderTime).startsWith(pf)); }
+    else if (coPeriod === "half") { const s = toLD(nowMs5 - 180 * msDay5); coFiltered = coFiltered.filter(d => d.orderTime && toLD(d.orderTime) >= s); }
     // time slot filter
     if (coTimeSlot !== "all") coFiltered = coFiltered.filter(d => d.orderTime && timeMatch5(new Date(d.orderTime).getHours()));
     // dow filter
@@ -1639,7 +1795,7 @@ export default function App() {
     // weather filter
     if (coWeather !== "all") {
       const wxLogs = new Set(anaAll.filter(l => l.weather === coWeather).map(l => l.date));
-      coFiltered = coFiltered.filter(d => d.orderTime && wxLogs.has(new Date(d.orderTime).toISOString().slice(0,10)));
+      coFiltered = coFiltered.filter(d => d.orderTime && wxLogs.has(toLD(d.orderTime)));
     }
 
     const coPie = COS.map(c => {
@@ -1712,7 +1868,7 @@ export default function App() {
             <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
               <ResponsiveContainer width={140} height={140}>
                 <PieChart style={{ pointerEvents: "none" }}>
-                  <Pie isAnimationActive={chartAnim} data={coPie.filter(c => c.value > 0)} dataKey="value" cx="50%" cy="50%" outerRadius={60} innerRadius={30} paddingAngle={2} activeIndex={-1} activeShape={null}>
+                  <Pie isAnimationActive={false} data={coPie.filter(c => c.value > 0)} dataKey="value" cx="50%" cy="50%" outerRadius={60} innerRadius={30} paddingAngle={2} activeIndex={-1} activeShape={null}>
                     {coPie.filter(c => c.value > 0).map((c, i) => <Cell key={i} fill={c.bg} />)}
                   </Pie>
                 </PieChart>
@@ -1736,7 +1892,7 @@ export default function App() {
                 <XAxis dataKey="name" tick={{ fontSize: sz(12), fill: T.textDim }} axisLine={false} tickLine={false} />
                 <YAxis tick={{ fontSize: sz(9), fill: T.textDim }} axisLine={false} tickLine={false} />
                 <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
-                <Bar isAnimationActive={chartAnim} dataKey="平均単価" radius={[4, 4, 0, 0]}>
+                <Bar isAnimationActive={false} dataKey="平均単価" radius={[4, 4, 0, 0]}>
                   {coAvg.map((c, i) => <Cell key={i} fill={c.bg} />)}
                 </Bar>
               </BarChart>
@@ -1777,7 +1933,7 @@ export default function App() {
                 <XAxis type="number" tick={{ fontSize: sz(9), fill: T.textDim }} axisLine={false} tickLine={false} />
                 <YAxis type="category" dataKey="name" tick={{ fontSize: sz(11), fill: T.textDim }} axisLine={false} tickLine={false} width={50} />
                 <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
-                <Bar isAnimationActive={chartAnim} dataKey="時給" fill={T.accent} radius={[0, 4, 4, 0]} />
+                <Bar isAnimationActive={false} dataKey="時給" fill={T.accent} radius={[0, 4, 4, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -1907,7 +2063,7 @@ export default function App() {
     const weeklyLine = [0,1,2,3,4,5,6,7].reverse().map(w => {
       const end = new Date(today3); end.setDate(end.getDate() - w * 7);
       const start = new Date(end); start.setDate(start.getDate() - 6);
-      const sStr = start.toISOString().slice(0,10); const eStr = end.toISOString().slice(0,10);
+      const sStr = toLD(start.getTime()); const eStr = toLD(end.getTime());
       const logs = anaAll.filter(l => l.date >= sStr && l.date <= eStr);
       const ds = logs.flatMap(l => (l.deliveries || []).filter(d => !d.cancelled));
       const rev = ds.reduce((s, d) => s + (d.reward || 0), 0);
@@ -1931,7 +2087,7 @@ export default function App() {
                 <XAxis dataKey="name" tick={{ fontSize: sz(9), fill: T.textDim }} axisLine={false} />
                 <YAxis tick={{ fontSize: sz(9), fill: T.textDim }} axisLine={false} />
                 <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
-                <Line isAnimationActive={chartAnim} type="monotone" dataKey="売上" stroke={T.accent} strokeWidth={2} dot={{ r: 4, fill: T.accent }} />
+                <Line isAnimationActive={false} type="monotone" dataKey="売上" stroke={T.accent} strokeWidth={2} dot={{ r: 4, fill: T.accent }} />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -1943,7 +2099,7 @@ export default function App() {
                 <XAxis dataKey="name" tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} />
                 <YAxis tick={{ fontSize: sz(9), fill: T.textDim }} axisLine={false} />
                 <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
-                <Line isAnimationActive={chartAnim} type="monotone" dataKey="売上" stroke={T.purple} strokeWidth={2} dot={{ r: 4, fill: T.purple }} />
+                <Line isAnimationActive={false} type="monotone" dataKey="売上" stroke={T.purple} strokeWidth={2} dot={{ r: 4, fill: T.purple }} />
               </LineChart>
             </ResponsiveContainer>
           </div>
@@ -1989,10 +2145,10 @@ export default function App() {
 
     let upFiltered = anaAD;
     // period
-    if (upPeriod === "today") upFiltered = upFiltered.filter(d => d.orderTime && new Date(d.orderTime).toISOString().slice(0,10) === todayDate);
-    else if (upPeriod === "week") { const s = new Date(nowMs6 - 6 * msDay6).toISOString().slice(0,10); upFiltered = upFiltered.filter(d => d.orderTime && new Date(d.orderTime).toISOString().slice(0,10) >= s); }
-    else if (upPeriod === "month") { const pf = todayDate.slice(0,7); upFiltered = upFiltered.filter(d => d.orderTime && new Date(d.orderTime).toISOString().slice(0,10).startsWith(pf)); }
-    else if (upPeriod === "half") { const s = new Date(nowMs6 - 180 * msDay6).toISOString().slice(0,10); upFiltered = upFiltered.filter(d => d.orderTime && new Date(d.orderTime).toISOString().slice(0,10) >= s); }
+    if (upPeriod === "today") upFiltered = upFiltered.filter(d => d.orderTime && toLD(d.orderTime) === todayDate);
+    else if (upPeriod === "week") { const s = toLD(nowMs6 - 6 * msDay6); upFiltered = upFiltered.filter(d => d.orderTime && toLD(d.orderTime) >= s); }
+    else if (upPeriod === "month") { const pf = todayDate.slice(0,7); upFiltered = upFiltered.filter(d => d.orderTime && toLD(d.orderTime).startsWith(pf)); }
+    else if (upPeriod === "half") { const s = toLD(nowMs6 - 180 * msDay6); upFiltered = upFiltered.filter(d => d.orderTime && toLD(d.orderTime) >= s); }
     // time slot
     if (upTimeSlot !== "all") upFiltered = upFiltered.filter(d => d.orderTime && timeMatch6(new Date(d.orderTime).getHours()));
     // dow
@@ -2002,7 +2158,7 @@ export default function App() {
     // weather
     if (upWeather !== "all") {
       const wxLogs2 = new Set(anaAll.filter(l => l.weather === upWeather).map(l => l.date));
-      upFiltered = upFiltered.filter(d => d.orderTime && wxLogs2.has(new Date(d.orderTime).toISOString().slice(0,10)));
+      upFiltered = upFiltered.filter(d => d.orderTime && wxLogs2.has(toLD(d.orderTime)));
     }
 
     const pAvgs = COS.map(c => { const ds = upFiltered.filter(d => d.company === c.id); const cnt = ds.reduce((s,d) => s+dc(d),0); return { name: c.letter, bg: c.bg, 平均単価: cnt > 0 ? Math.round(ds.reduce((s,d)=>s+(d.reward||0),0)/cnt) : 0, cnt }; });
@@ -2078,7 +2234,7 @@ export default function App() {
                 <XAxis dataKey="name" tick={{ fontSize: sz(13), fill: T.textDim }} axisLine={false} tickLine={false} />
                 <YAxis tick={{ fontSize: sz(9), fill: T.textDim }} axisLine={false} tickLine={false} />
                 <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
-                <Bar isAnimationActive={chartAnim} dataKey="平均単価" radius={[4, 4, 0, 0]}>
+                <Bar isAnimationActive={false} dataKey="平均単価" radius={[4, 4, 0, 0]}>
                   {pAvgs.map((c, i) => <Cell key={i} fill={c.bg} />)}
                 </Bar>
               </BarChart>
@@ -2209,7 +2365,7 @@ export default function App() {
     );
 
     return (
-      <div style={{ background: T.bg, height: "100vh", maxWidth: 430, margin: "0 auto", fontFamily: FN, color: T.text, display: "flex", flexDirection: "column" }}
+      <div style={{ background: T.bg, height: "100dvh", maxWidth: 430, margin: "0 auto", fontFamily: FN, color: T.text, display: "flex", flexDirection: "column" }}
         onClick={() => setAaDropdown(null)}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px 8px", flexShrink: 0 }}>
           <div style={{ fontSize: sz(17), fontWeight: 700 }}>🗺️ エリア別分析</div>
@@ -2338,6 +2494,49 @@ export default function App() {
     );
   }
 
+  if (anaScreen === "highvalue") {
+    return (
+      <div style={{ background: T.bg, height: "100dvh", maxWidth: 430, margin: "0 auto", fontFamily: FN, color: T.text }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px 8px", height: 48 }}>
+          <div style={{ fontSize: sz(17), fontWeight: 700 }}>💎 高単価配達マップ</div>
+          <button style={{ background: "none", border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.textSub, padding: "4px 10px", fontSize: sz(12), cursor: "pointer", fontFamily: FN }} onClick={() => setScreen("main")}>戻る</button>
+        </div>
+        <div style={{ height: "calc(100dvh - 48px)", position: "relative", borderTop: `1px solid ${T.border}` }}>
+          <div ref={hvElRef} style={{ height: "100%", width: "100%" }} />
+          {/* Filter: min rate pills */}
+          <div style={{ position: "absolute", top: 10, left: 10, right: 10, zIndex: 1000 }}>
+            <div style={{ display: "flex", gap: 4 }}>
+              {[
+                { rate: 100, label: "¥100+/分", color: "#22C55E" },
+                { rate: 200, label: "¥200+/分", color: "#F59E0B" },
+                { rate: 300, label: "¥300+/分", color: "#EF4444" },
+              ].map(opt => {
+                const active = hvMinRate === opt.rate;
+                return (
+                  <button key={opt.rate} onClick={() => setHvMinRate(opt.rate)}
+                    style={{
+                      flex: 1, padding: "8px 0", borderRadius: 8, border: active ? `2px solid ${opt.color}` : "none",
+                      cursor: "pointer", fontFamily: FN, fontSize: sz(12), fontWeight: active ? 800 : 500,
+                      background: active ? `${opt.color}22` : `${T.card}EE`,
+                      color: active ? opt.color : T.textMuted,
+                      boxShadow: "0 2px 6px #0003",
+                    }}>
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          {/* Legend + count */}
+          <div style={{ position: "absolute", bottom: 10, left: 10, right: 10, zIndex: 1000, display: "flex", justifyContent: "space-between", alignItems: "center", background: `${T.card}DD`, borderRadius: 10, padding: "8px 12px", boxShadow: "0 2px 8px #0003" }}>
+            <div style={{ fontSize: sz(11), color: T.textMuted }}>全期間の分給 ¥{hvMinRate}+/分 の配達</div>
+            <div style={{ fontSize: sz(13), fontWeight: 700, color: { 100: "#22C55E", 200: "#F59E0B", 300: "#EF4444" }[hvMinRate] }}>{hvPinCount}<span style={{ fontSize: sz(10), color: T.textMuted, fontWeight: 500 }}> 件</span></div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (anaScreen === "heatmap") {
     const RATING_COLORS2 = { good: "#EAB308", normal: "#9CA3AF", bad: "#3B82F6", cancelled: "#EF4444" };
     const PERIODS = [
@@ -2410,14 +2609,14 @@ export default function App() {
     );
 
     return (
-      <div style={{ background: T.bg, height: "100vh", maxWidth: 430, margin: "0 auto", fontFamily: FN, color: T.text }}
+      <div style={{ background: T.bg, height: "100dvh", maxWidth: 430, margin: "0 auto", fontFamily: FN, color: T.text }}
         onClick={() => setHmDropdown(null)}>
         {/* Header */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px 8px", height: 48 }}>
           <div style={{ fontSize: sz(17), fontWeight: 700 }}>📍 注文ヒートマップ</div>
           <button style={{ background: "none", border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.textSub, padding: "4px 10px", fontSize: sz(12), cursor: "pointer", fontFamily: FN }} onClick={() => setScreen("main")}>戻る</button>
         </div>
-        <div style={{ height: "calc(100vh - 48px)", position: "relative", borderTop: `1px solid ${T.border}` }}>
+        <div style={{ height: "calc(100dvh - 48px)", position: "relative", borderTop: `1px solid ${T.border}` }}>
           <div ref={hmElRef} style={{ height: "100%", width: "100%" }} />
 
           {/* Filter overlay */}
@@ -2496,12 +2695,218 @@ export default function App() {
     );
   }
 
+  // ═══ HISTORY ═══
+  if (screen === "history") {
+    // Build sorted past logs (excluding today)
+    const today = tds();
+    const pastLogs = allLogs.filter(l => l.date && l.date !== today).sort((a, b) => b.date.localeCompare(a.date));
+    // Group by month
+    const months = {};
+    pastLogs.forEach(log => {
+      const m = log.date.slice(0, 7);
+      if (!months[m]) months[m] = [];
+      months[m].push(log);
+    });
+    const monthKeys = Object.keys(months).sort((a, b) => b.localeCompare(a));
+    if (histDetail) {
+      const d = histDetail.delivery;
+      const c = COS.find(cc => cc.id === d.company);
+      const ot = OT.find(o => o.id === d.orderType);
+      const dur = d.completeTime && d.orderTime ? d.completeTime - d.orderTime : 0;
+      const durMin = dur > 0 ? dur / 60000 : 0;
+      const perMin = durMin > 0 ? Math.round((d.reward || 0) / durMin) : 0;
+      return (
+        <div style={{ fontFamily: FN, background: T.bg, minHeight: "100dvh", height: "100dvh", maxWidth: 430, margin: "0 auto", color: T.text, padding: "14px 16px", overflowY: "auto" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <div style={{ fontSize: sz(16), fontWeight: 700 }}>配達詳細</div>
+            <button onClick={() => setHistDetail(null)} style={{ background: "none", border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.textSub, padding: "4px 12px", fontSize: sz(12), cursor: "pointer", fontFamily: FN }}>戻る</button>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+          <div style={{ width: "100%", maxWidth: 340 }}>
+            <div style={{ background: T.card, borderRadius: 14, padding: "14px 16px", border: `1px solid ${T.border}` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                <div style={{ width: 40, height: 40, borderRadius: 10, background: c?.bg || "#333", color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: sz(19), fontWeight: 800 }}>{c?.letter || "?"}</div>
+                <div>
+                  <div style={{ fontSize: sz(15), fontWeight: 700, color: T.text }}>{c?.name || "不明"}</div>
+                  <div style={{ fontSize: sz(12), color: T.textMuted }}>{ot?.label || "シングル"}{d.cancelled && <span style={{ color: "#EF4444" }}> キャンセル</span>}</div>
+                </div>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>日付</span><span style={{ fontSize: sz(14), fontWeight: 600, color: T.text }}>{histDetail.date}</span></div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>時間</span><span style={{ fontSize: sz(14), fontWeight: 600, color: T.text }}>{ft(d.orderTime)}〜{ft(d.completeTime)}</span></div>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>所要時間</span><span style={{ fontSize: sz(14), fontWeight: 600, color: T.text }}>{fm(dur)}</span></div>
+              {perMin > 0 && !d.cancelled && <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>分給</span><span style={{ fontSize: sz(15), fontWeight: 700, color: "#0EA5E9" }}>¥{perMin.toLocaleString()}/分</span></div>}
+              <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}` }}><span style={{ fontSize: sz(13), color: T.textMuted }}>配達報酬</span><span style={{ fontSize: sz(17), fontWeight: 700, color: T.accent }}>¥{(d.reward || 0).toLocaleString()}</span></div>
+              {(d.incentive || 0) > 0 && <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}` }}><span style={{ fontSize: sz(13), color: T.textMuted }}>インセンティブ</span><span style={{ fontSize: sz(17), fontWeight: 700, color: T.purple }}>¥{(d.incentive || 0).toLocaleString()}</span></div>}
+              {d.rating && !d.cancelled && (
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}` }}>
+                  <span style={{ fontSize: sz(13), color: T.textMuted }}>評価</span>
+                  <span style={{ fontSize: sz(14), fontWeight: 600, color: d.rating === "good" ? "#EAB308" : d.rating === "bad" ? "#3B82F6" : T.textMuted }}>{d.rating === "good" ? "🟡 良い" : d.rating === "bad" ? "🔵 悪い" : "⚪ 普通"}</span>
+                </div>
+              )}
+              {d.areaName && (
+                <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}` }}>
+                  <span style={{ fontSize: sz(13), color: T.textMuted }}>エリア</span>
+                  <span style={{ fontSize: sz(14), fontWeight: 600, color: T.text }}>{d.areaName}</span>
+                </div>
+              )}
+              {d.apiWeather && (
+                <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginTop: 4 }}>
+                  <div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 5 }}>天候データ</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 5 }}>
+                    <div style={{ background: T.barBg, borderRadius: 7, padding: "6px 4px", textAlign: "center" }}>
+                      <div style={{ fontSize: sz(9), color: T.textDim }}>天候</div>
+                      <div style={{ fontSize: sz(15), fontWeight: 700, color: T.text }}>{WEATHER.find(w => w.id === d.apiWeather.weatherId)?.icon || "?"}</div>
+                    </div>
+                    <div style={{ background: T.barBg, borderRadius: 7, padding: "6px 4px", textAlign: "center" }}>
+                      <div style={{ fontSize: sz(9), color: T.textDim }}>気温</div>
+                      <div style={{ fontSize: sz(13), fontWeight: 700, color: T.text }}>{d.apiWeather.temperature}℃</div>
+                    </div>
+                    <div style={{ background: T.barBg, borderRadius: 7, padding: "6px 4px", textAlign: "center" }}>
+                      <div style={{ fontSize: sz(9), color: T.textDim }}>風速</div>
+                      <div style={{ fontSize: sz(13), fontWeight: 700, color: T.text }}>{d.apiWeather.windspeed}<span style={{ fontSize: sz(8) }}>km/h</span></div>
+                    </div>
+                    <div style={{ background: T.barBg, borderRadius: 7, padding: "6px 4px", textAlign: "center" }}>
+                      <div style={{ fontSize: sz(9), color: T.textDim }}>雨量</div>
+                      <div style={{ fontSize: sz(13), fontWeight: 700, color: T.text }}>{d.apiWeather.precipitation != null ? d.apiWeather.precipitation : "-"}<span style={{ fontSize: sz(8) }}>mm</span></div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Day label helper
+    const dayLabel = (dateStr) => {
+      const d = new Date(dateStr + "T00:00:00");
+      const dow = ["日","月","火","水","木","金","土"][d.getDay()];
+      return `${parseInt(dateStr.slice(8))}日（${dow}）`;
+    };
+    const monthLabel = (m) => `${parseInt(m.slice(0, 4))}年${parseInt(m.slice(5))}月`;
+
+    return (
+      <div style={{ fontFamily: FN, background: T.bg, minHeight: "100dvh", height: "100dvh", maxWidth: 430, margin: "0 auto", color: T.text, padding: "14px 16px", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <div style={{ fontSize: sz(18), fontWeight: 700 }}>📋 配達履歴</div>
+          <button onClick={() => setScreen("main")} style={{ background: "none", border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.textSub, padding: "4px 12px", fontSize: sz(12), cursor: "pointer", fontFamily: FN }}>戻る</button>
+        </div>
+
+        {pastLogs.length === 0 ? (
+          <div style={{ textAlign: "center", padding: "60px 0", color: T.textDim }}>
+            <div style={{ fontSize: sz(40), marginBottom: 12 }}>📭</div>
+            <div style={{ fontSize: sz(14) }}>過去の配達記録はありません</div>
+          </div>
+        ) : (
+          monthKeys.map(m => {
+            const mLogs = months[m];
+            const mDels = mLogs.reduce((s, l) => s + (l.deliveries || []).filter(d => !d.cancelled).reduce((ss, d) => ss + dc(d), 0), 0);
+            const mRev = mLogs.reduce((s, l) => s + dayRev(l, settings.incInReward), 0);
+            return (
+              <div key={m} style={{ marginBottom: 20 }}>
+                {/* Month header */}
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, padding: "0 2px" }}>
+                  <div style={{ fontSize: sz(15), fontWeight: 700, color: T.text }}>{monthLabel(m)}</div>
+                  <div style={{ fontSize: sz(12), color: T.textMuted }}>{mDels}件 / ¥{mRev.toLocaleString()}</div>
+                </div>
+                {/* Day cards */}
+                {mLogs.map(log => {
+                  const dels = (log.deliveries || []);
+                  const actD = dels.filter(d => !d.cancelled);
+                  const dCnt = actD.reduce((s, d) => s + dc(d), 0);
+                  const dRev = dayRev(log, settings.incInReward);
+                  const expanded = !!histExpanded[log.date];
+                  const sesTotal = (log.sessions || []).reduce((s, x) => s + (x.end - x.start), 0);
+                  const brkTotal = (log.breaks || []).reduce((s, b) => (b.start && b.end) ? s + (b.end - b.start) : s, 0);
+                  const workTotal = Math.max(0, sesTotal - brkTotal);
+                  const hrRate = workTotal > 0 ? Math.round(dRev / (workTotal / 3600000)) : 0;
+                  return (
+                    <div key={log.date} style={{ background: T.card, borderRadius: 12, border: `1px solid ${T.border}`, marginBottom: 6, overflow: "hidden" }}>
+                      {/* Day summary - tap to expand */}
+                      <div onClick={() => setHistExpanded(prev => ({ ...prev, [log.date]: !prev[log.date] }))} style={{ display: "flex", alignItems: "center", padding: "10px 14px", cursor: "pointer", gap: 10 }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+                            <span style={{ fontSize: sz(14), fontWeight: 700, color: T.text }}>{dayLabel(log.date)}</span>
+                            <span style={{ fontSize: sz(11), color: T.textMuted }}>{dCnt}件</span>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginTop: 2 }}>
+                            <span style={{ fontSize: sz(16), fontWeight: 800, color: T.accent }}>¥{dRev.toLocaleString()}</span>
+                            {workTotal > 0 && <span style={{ fontSize: sz(11), color: T.textMuted }}>{fd(workTotal)}</span>}
+                            {hrRate > 0 && <span style={{ fontSize: sz(11), color: "#0EA5E9" }}>¥{hrRate.toLocaleString()}/h</span>}
+                          </div>
+                        </div>
+                        <div style={{ fontSize: sz(12), color: T.textDim, transition: "transform 0.2s", transform: expanded ? "rotate(180deg)" : "rotate(0)" }}>▼</div>
+                      </div>
+                      {/* Expanded delivery list */}
+                      {expanded && (
+                        <div style={{ borderTop: `1px solid ${T.border}`, padding: "4px 12px 8px" }}>
+                          {dels.length === 0 ? (
+                            <div style={{ padding: "8px 0", fontSize: sz(12), color: T.textDim, textAlign: "center" }}>配達なし</div>
+                          ) : [...dels].reverse().map((d, i) => {
+                            const c = COS.find(cc => cc.id === d.company);
+                            const ot = OT.find(t => t.id === d.orderType);
+                            const dur = d.completeTime && d.orderTime ? d.completeTime - d.orderTime : 0;
+                            const durMin = dur > 0 ? dur / 60000 : 0;
+                            const perMin = durMin > 0 ? Math.round((d.reward || 0) / durMin) : 0;
+                            return (
+                              <div key={i} onClick={() => setHistDetail({ delivery: d, date: log.date })} style={{ display: "flex", alignItems: "center", gap: 0, padding: "7px 0", borderBottom: i < dels.length - 1 ? `1px solid ${T.border}` : "none", cursor: "pointer" }}>
+                                <div style={{ width: 28, height: 28, borderRadius: 7, background: d.cancelled ? T.textFaint : (c?.bg || "#333"), color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: sz(14), fontWeight: 700, flexShrink: 0, marginRight: 8 }}>{c?.letter || "?"}</div>
+                                <div style={{ flex: 1, minWidth: 0, marginRight: 6 }}>
+                                  {d.cancelled ? <div style={{ fontSize: sz(12), color: "#EF4444", fontWeight: 600 }}>キャンセル</div> : (
+                                    <>
+                                      <div style={{ display: "flex", alignItems: "baseline", gap: 3 }}>
+                                        <span style={{ fontSize: sz(14), fontWeight: 700, color: T.text }}>¥{(d.reward || 0).toLocaleString()}</span>
+                                        {(d.incentive || 0) > 0 && <span style={{ fontSize: sz(9), color: T.purple }}>+¥{d.incentive.toLocaleString()}</span>}
+                                      </div>
+                                      {perMin > 0 && <div style={{ fontSize: sz(11), fontWeight: 600, color: "#0EA5E9", marginTop: 1 }}>¥{perMin.toLocaleString()}/分</div>}
+                                    </>
+                                  )}
+                                </div>
+                                {ot && ot.c > 1 && <div style={{ fontSize: sz(10), fontWeight: 700, color: "#F59E0B", background: "#F59E0B22", padding: "2px 5px", borderRadius: 4, flexShrink: 0, marginRight: 4 }}>{ot.short}</div>}
+                                {d.rating && !d.cancelled && <div style={{ width: 8, height: 8, borderRadius: 4, background: d.rating === "good" ? "#EAB308" : d.rating === "bad" ? "#3B82F6" : T.textDim, flexShrink: 0, marginRight: 6 }} />}
+                                <div style={{ textAlign: "right", flexShrink: 0 }}>
+                                  <div style={{ fontSize: sz(11), color: T.textSub, whiteSpace: "nowrap" }}>{ft(d.orderTime)}〜{ft(d.completeTime)}</div>
+                                  <div style={{ fontSize: sz(10), color: T.textMuted }}>{fm(dur)}</div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                          {/* Daily incentives */}
+                          {(log.dailyIncentives || []).length > 0 && (
+                            <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 6, marginTop: 2 }}>
+                              <div style={{ fontSize: sz(10), color: T.textDim, marginBottom: 4 }}>日次インセンティブ</div>
+                              {log.dailyIncentives.map((di, j) => {
+                                const dic = COS.find(cc => cc.id === di.company);
+                                return (
+                                  <div key={j} style={{ display: "flex", alignItems: "center", gap: 6, padding: "3px 0" }}>
+                                    <div style={{ width: 20, height: 20, borderRadius: 5, background: dic?.bg || "#333", color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: sz(10), fontWeight: 700 }}>{dic?.letter || "?"}</div>
+                                    <span style={{ fontSize: sz(12), color: T.purple, fontWeight: 600 }}>+¥{(di.amount || 0).toLocaleString()}</span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })
+        )}
+      </div>
+    );
+  }
+
   // ═══ MAIN ═══
   const stTx = isOn ? (isBrk ? "休憩中" : isJz ? "地蔵中" : hasOrd ? "配達中" : "待機中") : hasWrk ? "オフライン" : "未開始";
   const stCo = isOn ? (isJz ? "#F59E0B" : "#22C55E") : hasWrk ? "#F59E0B" : T.textDim;
 
   return (
-    <div style={{ fontFamily: FN, background: T.bg, color: T.text, height: "100vh", maxWidth: 430, margin: "0 auto", display: "flex", flexDirection: "column", position: "relative", overflow: "hidden" }}>
+    <div style={{ fontFamily: FN, background: T.bg, color: T.text, height: "100dvh", maxWidth: 430, margin: "0 auto", display: "flex", flexDirection: "column", position: "relative", overflow: "hidden" }}>
       {PopupEl}{WeatherEl}{GoalEl}{MenuEl}{TutorialEl}
 
       {/* Flash feedback handled via inline styles */}
@@ -2585,7 +2990,7 @@ export default function App() {
       {/* ─── Delivery Feedback Toast ─── */}
       {deliveryFeedback && (
         <div style={{ position: "fixed", top: 60, left: "50%", transform: "translateX(-50%)", zIndex: 360, maxWidth: 340, width: "85%", fontFamily: FN, animation: "none" }}>
-          <div style={{ background: `${deliveryFeedback.color}18`, border: `1.5px solid ${deliveryFeedback.color}55`, borderRadius: 14, padding: "12px 16px", display: "flex", alignItems: "center", gap: 12, boxShadow: `0 8px 24px ${deliveryFeedback.color}22` }}>
+          <div style={{ background: T.card, border: `2px solid ${deliveryFeedback.color}`, borderRadius: 14, padding: "14px 18px", display: "flex", alignItems: "center", gap: 12, boxShadow: `0 8px 30px #000A` }}>
             <span style={{ fontSize: sz(28) }}>{deliveryFeedback.icon}</span>
             <div>
               <div style={{ fontSize: sz(14), fontWeight: 700, color: deliveryFeedback.color }}>{deliveryFeedback.msg}</div>
@@ -2695,23 +3100,21 @@ export default function App() {
                 {/* Calendar (expandable) */}
                 {calOpen && (() => {
                   const now2 = new Date();
-                  const yr = now2.getFullYear(), mn = now2.getMonth();
-                  const firstDay = new Date(yr, mn, 1).getDay(); // 0=Sun
+                  const yr = calMonth.year, mn = calMonth.month;
+                  const isCurrentMonth = yr === now2.getFullYear() && mn === now2.getMonth();
+                  const firstDay = new Date(yr, mn, 1).getDay();
                   const daysInMonth = new Date(yr, mn + 1, 0).getDate();
-                  const todayD = now2.getDate();
-                  // Build revenue map for this month
+                  const todayD = isCurrentMonth ? now2.getDate() : -1;
                   const mPrefix = `${yr}-${String(mn+1).padStart(2,"0")}`;
                   const revMap = {};
                   allLogs.filter(l => l.date?.startsWith(mPrefix)).forEach(l => { revMap[parseInt(l.date.slice(8,10),10)] = dayRev(l, false); });
-                  if (data.date?.startsWith(mPrefix)) revMap[todayD] = totRew;
-                  const maxRev = Math.max(1, ...Object.values(revMap));
+                  if (isCurrentMonth && data.date?.startsWith(mPrefix)) revMap[todayD] = totRew;
                   const revColor = (r) => {
                     if (!r) return "transparent";
-                    const ratio = r / maxRev;
-                    if (ratio >= 0.8) return "#16A34AAA";
-                    if (ratio >= 0.5) return "#16A34A66";
-                    if (ratio >= 0.25) return "#16A34A44";
-                    return "#16A34A22";
+                    if (r >= 8000) return "#EF4444CC";
+                    if (r >= 5000) return "#F97316BB";
+                    if (r >= 3000) return "#3B82F6AA";
+                    return "#93C5FD77";
                   };
                   const DOW_H = ["日","月","火","水","木","金","土"];
                   const cells = [];
@@ -2719,8 +3122,15 @@ export default function App() {
                   for (let d = 1; d <= daysInMonth; d++) cells.push(d);
                   while (cells.length % 7 !== 0) cells.push(null);
                   const workDays = Object.keys(revMap).length;
+                  const prevMonth = () => { const m = mn === 0 ? 11 : mn - 1; const y = mn === 0 ? yr - 1 : yr; setCalMonth({ year: y, month: m }); };
+                  const nextMonth = () => { if (isCurrentMonth) return; const m = mn === 11 ? 0 : mn + 1; const y = mn === 11 ? yr + 1 : yr; setCalMonth({ year: y, month: m }); };
                   return (
                     <div style={{ marginTop: 4 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                        <button onClick={prevMonth} style={{ background: "none", border: "none", cursor: "pointer", fontSize: sz(16), color: T.textSub, padding: "4px 8px" }}>◀</button>
+                        <div style={{ fontSize: sz(13), fontWeight: 700, color: T.text }}>{yr}年{mn + 1}月</div>
+                        <button onClick={nextMonth} style={{ background: "none", border: "none", cursor: isCurrentMonth ? "default" : "pointer", fontSize: sz(16), color: isCurrentMonth ? T.textFaint : T.textSub, padding: "4px 8px" }}>▶</button>
+                      </div>
                       <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 2 }}>
                         {DOW_H.map((dh, i) => (
                           <div key={`h${i}`} style={{ textAlign: "center", fontSize: sz(9), color: i === 0 ? "#EF4444" : i === 6 ? "#3B82F6" : T.textMuted, padding: "2px 0" }}>{dh}</div>
@@ -2729,7 +3139,7 @@ export default function App() {
                           if (d === null) return <div key={i} />;
                           const rv = revMap[d];
                           const isToday = d === todayD;
-                          const isFuture = d > todayD;
+                          const isFuture = isCurrentMonth && d > todayD;
                           return (
                             <div key={i} style={{ aspectRatio: "1", borderRadius: 5, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", background: isFuture ? "transparent" : revColor(rv), border: isToday ? `1.5px solid ${T.accent}` : "none" }}>
                               <div style={{ fontSize: sz(9), color: isFuture ? T.textFaint : isToday ? T.accent : rv ? "#F5F5F5" : T.textMuted, fontWeight: isToday ? 700 : 400 }}>{d}</div>
@@ -2740,10 +3150,18 @@ export default function App() {
                       </div>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6 }}>
                         <span style={{ fontSize: sz(9), color: T.textMuted }}>{workDays}日稼働 / {daysInMonth}日</span>
-                        <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
-                          <span style={{ fontSize: sz(8), color: T.textMuted }}>少</span>
-                          {["#16A34A33","#16A34A55","#16A34A88","#16A34ABB"].map((c,i) => <div key={i} style={{ width: 10, height: 10, borderRadius: 2, background: c }} />)}
-                          <span style={{ fontSize: sz(8), color: T.textMuted }}>多</span>
+                        <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
+                          {[
+                            { color: "#93C5FD77", label: "~3k" },
+                            { color: "#3B82F6AA", label: "~5k" },
+                            { color: "#F97316BB", label: "~8k" },
+                            { color: "#EF4444CC", label: "8k+" },
+                          ].map((c, i) => (
+                            <div key={i} style={{ display: "flex", alignItems: "center", gap: 1 }}>
+                              <div style={{ width: 10, height: 10, borderRadius: 2, background: c.color }} />
+                              <span style={{ fontSize: sz(7), color: T.textMuted }}>{c.label}</span>
+                            </div>
+                          ))}
                         </div>
                       </div>
                     </div>
@@ -2899,15 +3317,20 @@ export default function App() {
                   const c = COS.find(cc => cc.id === d.company);
                   const ot = OT.find(t => t.id === d.orderType);
                   const dur = d.completeTime && d.orderTime ? d.completeTime - d.orderTime : 0;
+                  const durMin = dur > 0 ? dur / 60000 : 0;
+                  const perMin = durMin > 0 ? Math.round((d.reward || 0) / durMin) : 0;
                   return (
                     <div key={i} onClick={() => openEdit(ri)} style={{ display: "flex", alignItems: "center", gap: 0, padding: "7px 0", borderBottom: i < data.deliveries.length - 1 ? `1px solid ${T.border}` : "none", cursor: "pointer" }}>
                       <div style={{ width: 30, height: 30, borderRadius: 8, background: d.cancelled ? T.textFaint : (c?.bg || "#333"), color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: sz(15), fontWeight: 700, flexShrink: 0, marginRight: 8 }}>{c?.letter || "?"}</div>
                       <div style={{ flex: 1, minWidth: 0, marginRight: 6 }}>
                         {d.cancelled ? <div style={{ fontSize: sz(12), color: "#EF4444", fontWeight: 600 }}>キャンセル</div> : (
-                          <div style={{ display: "flex", alignItems: "baseline", gap: 3 }}>
-                            <span style={{ fontSize: sz(14), fontWeight: 700, color: T.text }}>¥{(d.reward || 0).toLocaleString()}</span>
-                            {(d.incentive || 0) > 0 && <span style={{ fontSize: sz(9), color: T.purple }}>+¥{d.incentive.toLocaleString()}</span>}
-                          </div>
+                          <>
+                            <div style={{ display: "flex", alignItems: "baseline", gap: 3 }}>
+                              <span style={{ fontSize: sz(14), fontWeight: 700, color: T.text }}>¥{(d.reward || 0).toLocaleString()}</span>
+                              {(d.incentive || 0) > 0 && <span style={{ fontSize: sz(9), color: T.purple }}>+¥{d.incentive.toLocaleString()}</span>}
+                            </div>
+                            {perMin > 0 && <div style={{ fontSize: sz(12), fontWeight: 600, color: "#0EA5E9", marginTop: 1 }}>¥{perMin.toLocaleString()}/分</div>}
+                          </>
                         )}
                       </div>
                       {ot && ot.c > 1 && <div style={{ fontSize: sz(10), fontWeight: 700, color: "#F59E0B", background: "#F59E0B22", padding: "2px 5px", borderRadius: 4, flexShrink: 0, marginRight: 4 }}>{ot.short}</div>}
@@ -2927,7 +3350,7 @@ export default function App() {
       </div>
 
       {/* Fixed bottom */}
-      <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, padding: "10px 16px 18px", background: `linear-gradient(transparent, ${T.bg} 30%)`, display: "flex", gap: 8, zIndex: 50 }}>
+      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, maxWidth: 430, margin: "0 auto", padding: "10px 16px 18px", background: `linear-gradient(transparent, ${T.bg} 30%)`, display: "flex", gap: 8, zIndex: 50 }}>
         <button style={flashBtn("#0EA5E9", !isOn || isBrk || hasOrd, BBH, "order")} onClick={doOrd} disabled={!isOn || isBrk || hasOrd}>受注</button>
         <button style={flashBtn("#F59E0B", !hasOrd, BBH, "complete")} onClick={doCmp} disabled={!hasOrd}>配達完了</button>
       </div>
