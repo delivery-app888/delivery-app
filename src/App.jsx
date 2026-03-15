@@ -323,7 +323,7 @@ export default function App() {
         if (perMin >= tier.min && perMin < tier.max) {
           const co2 = d2.company || "不明";
           L.circleMarker([d2.startLat, d2.startLng], { radius: tier.radius, color: tier.color, fillColor: tier.color, fillOpacity: 0.75, weight: 2 })
-            .bindPopup(`<b>¥${Math.round(perMin)}/分</b><br/>${co2} ¥${(d2.reward || 0).toLocaleString()}<br/>${fT(d2.orderTime)} (${Math.round(durMin)}分)<br/>${d2._date}`)
+            .bindPopup(`<b>¥${Math.round(perMin)}/分</b><br/>${co2} ¥${(d2.reward || 0).toLocaleString()}<br/>${fT(d2.orderTime)} (${Math.round(durMin)}分)<br/>${d2._date}<br/><span style="color:#888">📝 ${d2.memo ? d2.memo.replace(/</g,'&lt;').replace(/>/g,'&gt;') : 'メモなし'}</span>`)
             .addTo(hvLayerRef.current);
           pinCount++;
         }
