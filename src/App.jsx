@@ -192,20 +192,21 @@ export default function App() {
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
     hmMapRef.current = map;
     hmLayerRef.current = L.layerGroup().addTo(map);
-    // Current location marker
-    if (hmCenter) {
-      const locIcon = L.divIcon({ className: "", html: '<div style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;"><div style="position:absolute;width:40px;height:40px;border-radius:50%;background:#4285F433;animation:loc-ripple 2s ease-out infinite;"></div><div style="position:absolute;width:28px;height:28px;border-radius:50%;background:#4285F422;animation:loc-ripple 2s ease-out 0.6s infinite;"></div><div style="position:relative;width:16px;height:16px;background:#4285F4;border:3px solid #fff;border-radius:50%;box-shadow:0 0 8px #4285F466;z-index:1;"></div></div><style>@keyframes loc-ripple{0%{transform:scale(0.5);opacity:1}100%{transform:scale(1.8);opacity:0}}</style>', iconSize: [40, 40], iconAnchor: [20, 20] });
-      L.marker(hmCenter, { icon: locIcon, zIndexOffset: 1000 }).bindPopup("現在地").addTo(map);
-    }
     setTimeout(() => map.invalidateSize(), 200);
-  }, [screen, hmCenter]);
+  }, [screen]);
 
+  const hmLocRef = useRef(null);
   useEffect(() => {
     if (hmMapRef.current && hmCenter) {
       hmMapRef.current.setView(hmCenter, 14, { animate: true });
       setTimeout(() => { if (hmMapRef.current) hmMapRef.current.invalidateSize(); }, 200);
+      if (!hmLocRef.current) {
+        const locIcon = L.divIcon({ className: "", html: '<div style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;"><div style="position:absolute;width:40px;height:40px;border-radius:50%;background:#4285F433;animation:loc-ripple 2s ease-out infinite;"></div><div style="position:absolute;width:28px;height:28px;border-radius:50%;background:#4285F422;animation:loc-ripple 2s ease-out 0.6s infinite;"></div><div style="position:relative;width:16px;height:16px;background:#4285F4;border:3px solid #fff;border-radius:50%;box-shadow:0 0 8px #4285F466;z-index:1;"></div></div><style>@keyframes loc-ripple{0%{transform:scale(0.5);opacity:1}100%{transform:scale(1.8);opacity:0}}</style>', iconSize: [40, 40], iconAnchor: [20, 20] });
+        hmLocRef.current = L.marker(hmCenter, { icon: locIcon, zIndexOffset: 1000 }).bindPopup("現在地").addTo(hmMapRef.current);
+      }
     }
-  }, [hmCenter]);
+    if (screen !== "ana_heatmap") hmLocRef.current = null;
+  }, [hmCenter, screen]);
 
   useEffect(() => {
     if (screen !== "ana_heatmap" || !hmLayerRef.current) return;
@@ -283,19 +284,21 @@ export default function App() {
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
     hvMapRef.current = map;
     hvLayerRef.current = L.layerGroup().addTo(map);
-    if (hvCenter) {
-      const locIcon = L.divIcon({ className: "", html: '<div style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;"><div style="position:absolute;width:40px;height:40px;border-radius:50%;background:#4285F433;animation:loc-ripple 2s ease-out infinite;"></div><div style="position:absolute;width:28px;height:28px;border-radius:50%;background:#4285F422;animation:loc-ripple 2s ease-out 0.6s infinite;"></div><div style="position:relative;width:16px;height:16px;background:#4285F4;border:3px solid #fff;border-radius:50%;box-shadow:0 0 8px #4285F466;z-index:1;"></div></div><style>@keyframes loc-ripple{0%{transform:scale(0.5);opacity:1}100%{transform:scale(1.8);opacity:0}}</style>', iconSize: [40, 40], iconAnchor: [20, 20] });
-      L.marker(hvCenter, { icon: locIcon, zIndexOffset: 1000 }).bindPopup("現在地").addTo(map);
-    }
     setTimeout(() => map.invalidateSize(), 200);
-  }, [screen, hvCenter]);
+  }, [screen]);
 
+  const hvLocRef = useRef(null);
   useEffect(() => {
     if (hvMapRef.current && hvCenter) {
       hvMapRef.current.setView(hvCenter, 13, { animate: true });
       setTimeout(() => { if (hvMapRef.current) hvMapRef.current.invalidateSize(); }, 200);
+      if (!hvLocRef.current) {
+        const locIcon = L.divIcon({ className: "", html: '<div style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;"><div style="position:absolute;width:40px;height:40px;border-radius:50%;background:#4285F433;animation:loc-ripple 2s ease-out infinite;"></div><div style="position:absolute;width:28px;height:28px;border-radius:50%;background:#4285F422;animation:loc-ripple 2s ease-out 0.6s infinite;"></div><div style="position:relative;width:16px;height:16px;background:#4285F4;border:3px solid #fff;border-radius:50%;box-shadow:0 0 8px #4285F466;z-index:1;"></div></div><style>@keyframes loc-ripple{0%{transform:scale(0.5);opacity:1}100%{transform:scale(1.8);opacity:0}}</style>', iconSize: [40, 40], iconAnchor: [20, 20] });
+        hvLocRef.current = L.marker(hvCenter, { icon: locIcon, zIndexOffset: 1000 }).bindPopup("現在地").addTo(hvMapRef.current);
+      }
     }
-  }, [hvCenter]);
+    if (screen !== "ana_highvalue") hvLocRef.current = null;
+  }, [hvCenter, screen]);
 
   useEffect(() => {
     if (screen !== "ana_highvalue" || !hvLayerRef.current) return;
@@ -360,20 +363,22 @@ export default function App() {
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
     aaMapRef.current = map;
     aaLayerRef.current = L.layerGroup().addTo(map);
-    if (aaCenter) {
-      const locIcon = L.divIcon({ className: "", html: '<div style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;"><div style="position:absolute;width:40px;height:40px;border-radius:50%;background:#4285F433;animation:loc-ripple 2s ease-out infinite;"></div><div style="position:absolute;width:28px;height:28px;border-radius:50%;background:#4285F422;animation:loc-ripple 2s ease-out 0.6s infinite;"></div><div style="position:relative;width:16px;height:16px;background:#4285F4;border:3px solid #fff;border-radius:50%;box-shadow:0 0 8px #4285F466;z-index:1;"></div></div><style>@keyframes loc-ripple{0%{transform:scale(0.5);opacity:1}100%{transform:scale(1.8);opacity:0}}</style>', iconSize: [40, 40], iconAnchor: [20, 20] });
-      L.marker(aaCenter, { icon: locIcon, zIndexOffset: 1000 }).bindPopup("現在地").addTo(map);
-    }
     setTimeout(() => map.invalidateSize(), 300);
     setTimeout(() => map.invalidateSize(), 600);
-  }, [screen, aaCenter, aaBestCenter]);
+  }, [screen, aaBestCenter]);
 
+  const aaLocRef = useRef(null);
   useEffect(() => {
     if (aaMapRef.current && aaCenter) {
       aaMapRef.current.setView(aaCenter, 14, { animate: true });
       setTimeout(() => { if (aaMapRef.current) aaMapRef.current.invalidateSize(); }, 200);
+      if (!aaLocRef.current) {
+        const locIcon = L.divIcon({ className: "", html: '<div style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;"><div style="position:absolute;width:40px;height:40px;border-radius:50%;background:#4285F433;animation:loc-ripple 2s ease-out infinite;"></div><div style="position:absolute;width:28px;height:28px;border-radius:50%;background:#4285F422;animation:loc-ripple 2s ease-out 0.6s infinite;"></div><div style="position:relative;width:16px;height:16px;background:#4285F4;border:3px solid #fff;border-radius:50%;box-shadow:0 0 8px #4285F466;z-index:1;"></div></div><style>@keyframes loc-ripple{0%{transform:scale(0.5);opacity:1}100%{transform:scale(1.8);opacity:0}}</style>', iconSize: [40, 40], iconAnchor: [20, 20] });
+        aaLocRef.current = L.marker(aaCenter, { icon: locIcon, zIndexOffset: 1000 }).bindPopup("現在地").addTo(aaMapRef.current);
+      }
     }
-  }, [aaCenter]);
+    if (screen !== "ana_area") aaLocRef.current = null;
+  }, [aaCenter, screen]);
 
   // Area grid rendering (with filters)
   useEffect(() => {
