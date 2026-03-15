@@ -98,7 +98,6 @@ export default function App() {
   const aaLayerRef = useRef(null);
   // high-value heatmap
   const [hvCenter, setHvCenter] = useState(null);
-  const [hvMinRate, setHvMinRate] = useState(100);
   const [hvPinCount, setHvPinCount] = useState(0);
   const hvMapRef = useRef(null);
   const hvElRef = useRef(null);
@@ -133,7 +132,7 @@ export default function App() {
     if (screen !== prevScreen.current) {
       if (screen === "ana_heatmap") { setHmCenter(null); getPos().then(p => { if (p) setHmCenter([p.lat, p.lng]); }); setHmPeriod("today"); setHmTimeSlot("all"); setHmDow("all"); setHmCompany("all"); setHmWeather("all"); setHmDropdown(null); }
       if (screen === "ana_area") { setAaCenter(null); getPos().then(p => { if (p) setAaCenter([p.lat, p.lng]); }); setAaPeriod("all"); setAaTimeSlot("all"); setAaDow("all"); setAaCompany("all"); setAaWeather("all"); setAaDropdown(null); }
-      if (screen === "ana_highvalue") { setHvCenter(null); getPos().then(p => { if (p) setHvCenter([p.lat, p.lng]); }); setHvMinRate(100); }
+      if (screen === "ana_highvalue") { setHvCenter(null); getPos().then(p => { if (p) setHvCenter([p.lat, p.lng]); }); }
       if (screen === "ana_hourly") { setHrPeriod("today"); setHrDow("all"); setHrCompany("all"); setHrWeather("all"); setHrDropdown(null); }
       if (screen === "ana_weekday") { setWdPeriod("today"); setWdTimeSlot("all"); setWdCompany("all"); setWdWeather("all"); setWdDropdown(null); }
       if (screen === "ana_company") { setCoPeriod("today"); setCoTimeSlot("all"); setCoDow("all"); setCoWeather("all"); setCoDropdown(null); }
@@ -307,26 +306,31 @@ export default function App() {
       ...allLogs.flatMap(l => (l.deliveries || []).filter(d2 => d2.startLat && !d2.cancelled).map(d2 => ({ ...d2, _date: l.date }))),
       ...data.deliveries.filter(d2 => d2.startLat && !d2.cancelled).map(d2 => ({ ...d2, _date: data.date })),
     ];
-    const RC = { 100: "#22C55E", 200: "#F59E0B", 300: "#EF4444" };
-    const color = RC[hvMinRate] || "#22C55E";
-    const filt = allD.filter(d2 => {
-      if (!d2.orderTime || !d2.completeTime) return false;
-      const durMin = (d2.completeTime - d2.orderTime) / 60000;
-      if (durMin <= 0) return false;
-      const perMin = (d2.reward || 0) / durMin;
-      return perMin >= hvMinRate;
-    });
     const fT = (t2) => { if (!t2) return ""; const dt2 = new Date(t2); return `${dt2.getHours()}:${String(dt2.getMinutes()).padStart(2, "0")}`; };
-    filt.forEach(d2 => {
-      const durMin = (d2.completeTime - d2.orderTime) / 60000;
-      const perMin = Math.round((d2.reward || 0) / durMin);
-      const co2 = d2.company || "不明";
-      L.circleMarker([d2.startLat, d2.startLng], { radius: 7, color, fillColor: color, fillOpacity: 0.7, weight: 2 })
-        .bindPopup(`<b>¥${perMin}/分</b><br/>${co2} ¥${(d2.reward || 0).toLocaleString()}<br/>${fT(d2.orderTime)} (${Math.round(durMin)}分)<br/>${d2._date}`)
-        .addTo(hvLayerRef.current);
+    let pinCount = 0;
+    // Draw in order: 100+ first (bottom), then 200+, then 300+ (top)
+    const tiers = [
+      { min: 100, max: 200, color: "#22C55E", radius: 6 },
+      { min: 200, max: 300, color: "#F59E0B", radius: 7 },
+      { min: 300, max: Infinity, color: "#EF4444", radius: 8 },
+    ];
+    tiers.forEach(tier => {
+      allD.forEach(d2 => {
+        if (!d2.orderTime || !d2.completeTime) return;
+        const durMin = (d2.completeTime - d2.orderTime) / 60000;
+        if (durMin <= 0) return;
+        const perMin = (d2.reward || 0) / durMin;
+        if (perMin >= tier.min && perMin < tier.max) {
+          const co2 = d2.company || "不明";
+          L.circleMarker([d2.startLat, d2.startLng], { radius: tier.radius, color: tier.color, fillColor: tier.color, fillOpacity: 0.75, weight: 2 })
+            .bindPopup(`<b>¥${Math.round(perMin)}/分</b><br/>${co2} ¥${(d2.reward || 0).toLocaleString()}<br/>${fT(d2.orderTime)} (${Math.round(durMin)}分)<br/>${d2._date}`)
+            .addTo(hvLayerRef.current);
+          pinCount++;
+        }
+      });
     });
-    setHvPinCount(filt.length);
-  }, [screen, hvMinRate, allLogs, data]);
+    setHvPinCount(pinCount);
+  }, [screen, allLogs, data]);
 
   // ─── Area analysis: compute best area center from data ───
   const aaBestCenter = (() => {
@@ -2512,34 +2516,30 @@ export default function App() {
         </div>
         <div style={{ height: "calc(100dvh - 48px)", position: "relative", borderTop: `1px solid ${T.border}` }}>
           <div ref={hvElRef} style={{ height: "100%", width: "100%" }} />
-          {/* Filter: min rate pills */}
+          {/* Legend (top) */}
           <div style={{ position: "absolute", top: 10, left: 10, right: 10, zIndex: 1000 }}>
             <div style={{ display: "flex", gap: 4 }}>
               {[
-                { rate: 100, label: "¥100+/分", color: "#22C55E" },
-                { rate: 200, label: "¥200+/分", color: "#F59E0B" },
-                { rate: 300, label: "¥300+/分", color: "#EF4444" },
-              ].map(opt => {
-                const active = hvMinRate === opt.rate;
-                return (
-                  <button key={opt.rate} onClick={() => setHvMinRate(opt.rate)}
-                    style={{
-                      flex: 1, padding: "8px 0", borderRadius: 8, border: active ? `2px solid ${opt.color}` : "none",
-                      cursor: "pointer", fontFamily: FN, fontSize: sz(12), fontWeight: active ? 800 : 500,
-                      background: active ? `${opt.color}22` : `${T.card}EE`,
-                      color: active ? opt.color : T.textMuted,
-                      boxShadow: "0 2px 6px #0003",
-                    }}>
-                    {opt.label}
-                  </button>
-                );
-              })}
+                { label: "¥100〜199/分", color: "#22C55E" },
+                { label: "¥200〜299/分", color: "#F59E0B" },
+                { label: "¥300+/分", color: "#EF4444" },
+              ].map(opt => (
+                <div key={opt.label} style={{
+                  flex: 1, padding: "7px 0", borderRadius: 8,
+                  background: `${opt.color}44`, border: `2px solid ${opt.color}`,
+                  fontFamily: FN, fontSize: sz(11), fontWeight: 700,
+                  color: opt.color, textAlign: "center",
+                  boxShadow: "0 2px 6px #0003",
+                }}>
+                  {opt.label}
+                </div>
+              ))}
             </div>
           </div>
-          {/* Legend + count */}
+          {/* Pin count (bottom) */}
           <div style={{ position: "absolute", bottom: 10, left: 10, right: 10, zIndex: 1000, display: "flex", justifyContent: "space-between", alignItems: "center", background: `${T.card}DD`, borderRadius: 10, padding: "8px 12px", boxShadow: "0 2px 8px #0003" }}>
-            <div style={{ fontSize: sz(11), color: T.textMuted }}>全期間の分給 ¥{hvMinRate}+/分 の配達</div>
-            <div style={{ fontSize: sz(13), fontWeight: 700, color: { 100: "#22C55E", 200: "#F59E0B", 300: "#EF4444" }[hvMinRate] }}>{hvPinCount}<span style={{ fontSize: sz(10), color: T.textMuted, fontWeight: 500 }}> 件</span></div>
+            <div style={{ fontSize: sz(11), color: T.textMuted }}>全期間の高単価配達</div>
+            <div style={{ fontSize: sz(13), fontWeight: 700, color: T.accent }}>{hvPinCount}<span style={{ fontSize: sz(10), color: T.textMuted, fontWeight: 500 }}> 件</span></div>
           </div>
         </div>
       </div>
