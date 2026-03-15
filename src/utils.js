@@ -70,7 +70,7 @@ export const migrate = (d) => {
   if (!d.jizoSessions) d.jizoSessions = [];
   if (d.onlineStart !== undefined) { d.sessions = d.sessions || []; if (d.onlineStart && d.onlineEnd) d.sessions.push({ start: d.onlineStart, end: d.onlineEnd }); else if (d.onlineStart) d.currentSessionStart = d.onlineStart; delete d.onlineStart; delete d.onlineEnd; }
   if (!d.sessions) d.sessions = []; if (d.currentSessionStart === undefined) d.currentSessionStart = null; if (d.currentJizoStart === undefined) d.currentJizoStart = null;
-  d.deliveries.forEach(dl => { if (!dl.orderType) dl.orderType = "single"; if (dl.cancelled === undefined) dl.cancelled = false; if (dl.rating === undefined) dl.rating = null; if (dl.startLat === undefined) { dl.startLat = null; dl.startLng = null; dl.endLat = null; dl.endLng = null; } if (dl.apiWeather === undefined) dl.apiWeather = null; if (dl.areaName === undefined) dl.areaName = null; });
+  d.deliveries.forEach(dl => { if (!dl.orderType) dl.orderType = "single"; if (dl.cancelled === undefined) dl.cancelled = false; if (dl.rating === undefined) dl.rating = null; if (dl.startLat === undefined) { dl.startLat = null; dl.startLng = null; dl.endLat = null; dl.endLng = null; } if (dl.apiWeather === undefined) dl.apiWeather = null; if (dl.areaName === undefined) dl.areaName = null; if (dl.memo === undefined) dl.memo = ""; });
   return d;
 };
 

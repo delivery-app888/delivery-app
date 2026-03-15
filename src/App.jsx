@@ -514,10 +514,10 @@ export default function App() {
   const sesMs = data.sessions.reduce((s, x) => s + (x.end - x.start), 0) + (isOn ? now - data.currentSessionStart : 0);
   const wkMs = Math.max(0, sesMs - tBrkMs);
   const hBase = wkMs > 0 ? Math.round(totRew / (wkMs / 3600000)) : 0;
-  const hAll = wkMs > 0 ? Math.round(totAll / (wkMs / 3600000)) : 0;
+  const hAll = wkMs > 0 ? Math.round(totAll / (wkMs / 3600000)) : 0; // 実質時給はインセンティブ込み
   const cm = ms();
-  const pastRev = allLogs.filter(l => l.date?.startsWith(cm)).reduce((s, l) => s + dayRev(l, settings.incInGoal), 0);
-  const mRev = pastRev + (settings.incInGoal ? totAll : totRew);
+  const pastRev = allLogs.filter(l => l.date?.startsWith(cm)).reduce((s, l) => s + dayRev(l, true), 0);
+  const mRev = pastRev + totAll;
   const gPct = goal > 0 ? Math.round(mRev / goal * 100) : 0;
 
   // ─── Streak (consecutive work days) + best streak ───
@@ -589,7 +589,7 @@ export default function App() {
     const remainingGoal = Math.max(0, goal - pastRev);
     return Math.round(remainingGoal / workDaysLeft);
   })() : 0;
-  const todayRemaining = Math.max(0, dailyTarget - totAll);
+  const todayRemaining = Math.max(0, dailyTarget - totRew);
 
   // ─── 1. Golden Time indicator (historical hourly earnings) ───
   const goldenTime = (() => {
@@ -624,10 +624,10 @@ export default function App() {
   // ─── 2. "あと少し" nudge (80%+ of daily goal) ───
   const nudge = (() => {
     if (dailyTarget <= 0 || !isOn) return null;
-    const pct = totAll / dailyTarget;
+    const pct = totRew / dailyTarget;
     if (pct >= 1) return { type: "done" };
     if (pct >= 0.8) {
-      const rem = dailyTarget - totAll;
+      const rem = dailyTarget - totRew;
       const avgUnit = delCnt > 0 ? Math.round(totRew / delCnt) : 500;
       const estDels = Math.ceil(rem / avgUnit);
       return { type: "close", remaining: rem, estDels };
@@ -645,8 +645,8 @@ export default function App() {
     const typicalEndH = 10; // assume ~10 hours typical workday
     const elapsedH = (Date.now() - startH) / 3600000;
     const remainH = Math.max(0, typicalEndH - elapsedH);
-    const pace = totAll / hrWorked;
-    const predicted = Math.round(totAll + pace * remainH);
+    const pace = totRew / hrWorked;
+    const predicted = Math.round(totRew + pace * remainH);
     const pctOfGoal = dailyTarget > 0 ? Math.round(predicted / dailyTarget * 100) : 0;
     return { predicted, pace: Math.round(pace), pctOfGoal };
   })();
@@ -766,7 +766,7 @@ export default function App() {
         const endDelCnt = delCnt;
         const endRew = totRew;
         const endInc = totInc;
-        const endAll = totAll;
+        const endAll = endRew + endInc;
         const endHrBase = endWkMs > 0 ? Math.round(endRew / (endWkMs / 3600000)) : 0;
         const endHrAll = endWkMs > 0 ? Math.round(endAll / (endWkMs / 3600000)) : 0;
         // Find personal best
@@ -1197,6 +1197,22 @@ export default function App() {
               ))}
             </div>
           </div>
+          {/* Memo */}
+          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginTop: 8 }}>
+            <div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 5 }}>📝 メモ</div>
+            <textarea
+              value={editData.memo || ""}
+              onChange={(e) => setEditData({ ...editData, memo: e.target.value })}
+              placeholder="配達に関するメモを入力..."
+              style={{
+                width: "100%", minHeight: 60, maxHeight: 120, borderRadius: 8,
+                border: `1px solid ${T.borderLight}`, background: T.inputBg,
+                color: T.text, fontSize: sz(13), padding: "8px 10px",
+                fontFamily: FN, resize: "vertical", lineHeight: 1.5,
+                boxSizing: "border-box",
+              }}
+            />
+          </div>
           {/* API Weather */}
           {editData.apiWeather && (
             <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginTop: 8 }}>
@@ -1249,18 +1265,6 @@ export default function App() {
           <div style={rowLast}>
             <div><div style={{ fontSize: sz(14), fontWeight: 600 }}>文字サイズ（大きめ）</div><div style={{ fontSize: sz(11), color: T.textDim }}>全体の文字を大きく表示</div></div>
             <Toggle on={settings.largeFont} onToggle={() => updateSettings({ largeFont: !settings.largeFont })} T={T} />
-          </div>
-        </div>
-        {/* インセンティブ設定 */}
-        <div style={{ background: T.card, borderRadius: 14, padding: "4px 18px", border: `1px solid ${T.border}`, marginBottom: 16 }}>
-          <div style={{ fontSize: sz(12), color: T.textDim, fontWeight: 600, padding: "12px 0 4px", letterSpacing: 1 }}>インセンティブ</div>
-          <div style={row}>
-            <div style={{ flex: 1, marginRight: 12 }}><div style={{ fontSize: sz(14), fontWeight: 600 }}>配達報酬に含める</div><div style={{ fontSize: sz(11), color: T.textDim, lineHeight: 1.4 }}>メイン画面の「配達報酬」の金額に<br/>インセンティブを合算して表示</div></div>
-            <Toggle on={settings.incInReward} onToggle={() => updateSettings({ incInReward: !settings.incInReward })} T={T} />
-          </div>
-          <div style={rowLast}>
-            <div style={{ flex: 1, marginRight: 12 }}><div style={{ fontSize: sz(14), fontWeight: 600 }}>月間目標に含める</div><div style={{ fontSize: sz(11), color: T.textDim, lineHeight: 1.4 }}>月間目標の達成度の計算に<br/>インセンティブを含める</div></div>
-            <Toggle on={settings.incInGoal} onToggle={() => updateSettings({ incInGoal: !settings.incInGoal })} T={T} />
           </div>
         </div>
         {/* 稼働曜日設定 */}
@@ -1355,7 +1359,7 @@ export default function App() {
     const todayRev = todayDels.reduce((s, d) => s + (d.reward || 0), 0);
     const todayInc = todayDels.reduce((s, d) => s + (d.incentive || 0), 0) + data.dailyIncentives.reduce((s, d) => s + (d.amount || 0), 0);
     const todayHB = wkMs > 0 ? Math.round(todayRev / (wkMs / 3600000)) : 0;
-    const todayHA = wkMs > 0 ? Math.round((todayRev + todayInc) / (wkMs / 3600000)) : 0;
+    const todayHA = wkMs > 0 ? Math.round((todayRev + todayInc) / (wkMs / 3600000)) : 0; // 実質時給はインセンティブ込み
     // Today hourly bar data (1-hour intervals)
     const todayHourly = Array.from({ length: 24 }, (_, h) => {
       const ds = todayDels.filter(d => d.orderTime && new Date(d.orderTime).getHours() === h);
@@ -2803,7 +2807,7 @@ export default function App() {
           monthKeys.map(m => {
             const mLogs = months[m];
             const mDels = mLogs.reduce((s, l) => s + (l.deliveries || []).filter(d => !d.cancelled).reduce((ss, d) => ss + dc(d), 0), 0);
-            const mRev = mLogs.reduce((s, l) => s + dayRev(l, settings.incInReward), 0);
+            const mRev = mLogs.reduce((s, l) => s + dayRev(l, true), 0);
             return (
               <div key={m} style={{ marginBottom: 20 }}>
                 {/* Month header */}
@@ -2816,7 +2820,7 @@ export default function App() {
                   const dels = (log.deliveries || []);
                   const actD = dels.filter(d => !d.cancelled);
                   const dCnt = actD.reduce((s, d) => s + dc(d), 0);
-                  const dRev = dayRev(log, settings.incInReward);
+                  const dRev = dayRev(log, true);
                   const expanded = !!histExpanded[log.date];
                   const sesTotal = (log.sessions || []).reduce((s, x) => s + (x.end - x.start), 0);
                   const brkTotal = (log.breaks || []).reduce((s, b) => (b.start && b.end) ? s + (b.end - b.start) : s, 0);
@@ -3107,8 +3111,8 @@ export default function App() {
                   const todayD = isCurrentMonth ? now2.getDate() : -1;
                   const mPrefix = `${yr}-${String(mn+1).padStart(2,"0")}`;
                   const revMap = {};
-                  allLogs.filter(l => l.date?.startsWith(mPrefix)).forEach(l => { revMap[parseInt(l.date.slice(8,10),10)] = dayRev(l, false); });
-                  if (isCurrentMonth && data.date?.startsWith(mPrefix)) revMap[todayD] = totRew;
+                  allLogs.filter(l => l.date?.startsWith(mPrefix)).forEach(l => { revMap[parseInt(l.date.slice(8,10),10)] = dayRev(l, true); });
+                  if (isCurrentMonth && data.date?.startsWith(mPrefix)) revMap[todayD] = totAll;
                   const revColor = (r) => {
                     if (!r) return "transparent";
                     if (r >= 8000) return "#EF4444CC";
@@ -3246,8 +3250,8 @@ export default function App() {
               <div><div style={{ fontSize: sz(11), color: T.textMuted }}>配達</div>{canCnt > 0 && <div style={{ fontSize: sz(9), color: "#EF4444" }}>ｷｬﾝｾﾙ{canCnt}</div>}</div>
             </div>
             <div style={{ flex: 2, background: T.card, borderRadius: 12, padding: "12px 14px", border: `1px solid ${T.border}` }}>
-              <div style={{ fontSize: sz(11), color: T.textMuted, marginBottom: 2 }}>{settings.incInReward ? "配達報酬+ｲﾝｾﾝﾃｨﾌﾞ" : "配達報酬"}</div>
-              <AutoFitText value={`¥${rewardDisplay.toLocaleString()}`} maxSize={sz(26)} color={T.accent} />
+              <div style={{ fontSize: sz(11), color: T.textMuted, marginBottom: 2 }}>配達報酬</div>
+              <AutoFitText value={`¥${totRew.toLocaleString()}`} maxSize={sz(26)} color={T.accent} />
             </div>
           </div>
           <div style={{ display: "flex", gap: 10, marginBottom: 6 }}>
@@ -3334,7 +3338,8 @@ export default function App() {
                         )}
                       </div>
                       {ot && ot.c > 1 && <div style={{ fontSize: sz(10), fontWeight: 700, color: "#F59E0B", background: "#F59E0B22", padding: "2px 5px", borderRadius: 4, flexShrink: 0, marginRight: 4 }}>{ot.short}</div>}
-                      {d.rating && !d.cancelled && <div style={{ width: 8, height: 8, borderRadius: 4, background: d.rating === "good" ? "#EAB308" : d.rating === "bad" ? "#3B82F6" : T.textDim, flexShrink: 0, marginRight: 6 }} />}
+                      {d.rating && !d.cancelled && <div style={{ width: 8, height: 8, borderRadius: 4, background: d.rating === "good" ? "#EAB308" : d.rating === "bad" ? "#3B82F6" : T.textDim, flexShrink: 0, marginRight: 4 }} />}
+                      {d.memo && <span style={{ fontSize: sz(10), flexShrink: 0, marginRight: 4 }}>📝</span>}
                       <div style={{ textAlign: "right", flexShrink: 0 }}>
                         <div style={{ fontSize: sz(11), color: T.textSub, whiteSpace: "nowrap" }}>{ft(d.orderTime)}〜{ft(d.completeTime)}</div>
                         <div style={{ fontSize: sz(10), color: T.textMuted }}>{fm(dur)}</div>
