@@ -71,7 +71,7 @@ export default function App() {
   const [goalModal, setGoalModal] = useState(false); const [goalInput, setGoalInput] = useState("");
   const [avgPeriod, setAvgPeriod] = useState("all"); // today | week | month | all
   const [anaOpen, setAnaOpen] = useState(false);
-  const [isPremium] = useState(false);
+  const [isPremium] = useState(true); // テスト用: false に戻すとプレミアム制限が復活
   // heatmap
   const [hmPeriod, setHmPeriod] = useState("today");
   const [hmCenter, setHmCenter] = useState(null);
