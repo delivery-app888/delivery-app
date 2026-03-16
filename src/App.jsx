@@ -127,9 +127,11 @@ export default function App() {
   const [upCompany, setUpCompany] = useState("all");
   const [upWeather, setUpWeather] = useState("all");
   const [upDropdown, setUpDropdown] = useState(null);
+  const [dailyReportDate, setDailyReportDate] = useState(tds());
   const prevScreen = useRef(screen);
   useEffect(() => {
     if (screen !== prevScreen.current) {
+      if (screen === "ana_daily") { setDailyReportDate(tds()); }
       if (screen === "ana_heatmap") { setHmCenter(null); getPos().then(p => { if (p) setHmCenter([p.lat, p.lng]); }); setHmPeriod("today"); setHmTimeSlot("all"); setHmDow("all"); setHmCompany("all"); setHmWeather("all"); setHmDropdown(null); }
       if (screen === "ana_area") { setAaCenter(null); getPos().then(p => { if (p) setAaCenter([p.lat, p.lng]); }); setAaPeriod("all"); setAaTimeSlot("all"); setAaDow("all"); setAaCompany("all"); setAaWeather("all"); setAaDropdown(null); }
       if (screen === "ana_highvalue") { setHvCenter(null); getPos().then(p => { if (p) setHvCenter([p.lat, p.lng]); }); }
@@ -1371,120 +1373,136 @@ export default function App() {
 
   // ═══ DAILY REPORT (FREE) ═══
   if (anaScreen === "daily") {
-    const todayDels = data.deliveries.filter(d => !d.cancelled);
-    const todayCnt = todayDels.reduce((s, d) => s + dc(d), 0);
-    const todayRev = todayDels.reduce((s, d) => s + (d.reward || 0), 0);
-    const todayInc = todayDels.reduce((s, d) => s + (d.incentive || 0), 0) + data.dailyIncentives.reduce((s, d) => s + (d.amount || 0), 0);
-    const todayHB = wkMs > 0 ? Math.round(todayRev / (wkMs / 3600000)) : 0;
-    const todayHA = wkMs > 0 ? Math.round((todayRev + todayInc) / (wkMs / 3600000)) : 0; // 実質時給はインセンティブ込み
-    // Today hourly bar data (1-hour intervals)
-    const todayHourly = Array.from({ length: 24 }, (_, h) => {
-      const ds = todayDels.filter(d => d.orderTime && new Date(d.orderTime).getHours() === h);
+    const drDate = dailyReportDate;
+    const drIsToday = drDate === tds();
+    const drLog = drIsToday ? data : allLogs.find(l => l.date === drDate);
+    const drPrev = () => { const d = new Date(drDate + "T00:00:00"); d.setDate(d.getDate() - 1); setDailyReportDate(toLD(d.getTime())); };
+    const drNext = () => { if (drIsToday) return; const d = new Date(drDate + "T00:00:00"); d.setDate(d.getDate() + 1); setDailyReportDate(toLD(d.getTime())); };
+    const drDateObj = new Date(drDate + "T00:00:00");
+    const drLabel = `${drDateObj.getFullYear()}年${drDateObj.getMonth() + 1}月${drDateObj.getDate()}日`;
+    const DOW_NAMES = ["日","月","火","水","木","金","土"];
+    const drDow = DOW_NAMES[drDateObj.getDay()];
+
+    const drDels = drLog ? (drLog.deliveries || []).filter(d => !d.cancelled) : [];
+    const drCnt = drDels.reduce((s, d) => s + dc(d), 0);
+    const drRev = drDels.reduce((s, d) => s + (d.reward || 0), 0);
+    const drInc = drDels.reduce((s, d) => s + (d.incentive || 0), 0) + (drLog?.dailyIncentives || []).reduce((s, d) => s + (d.amount || 0), 0);
+    const drSesMs = drLog ? (drLog.sessions || []).reduce((s, x) => s + ((x.end || (drIsToday ? Date.now() : 0)) - x.start), 0) + (drIsToday && drLog.currentSessionStart ? Date.now() - drLog.currentSessionStart : 0) : 0;
+    const drBrkMs = drLog ? (drLog.breaks || []).reduce((s, b) => (b.start && b.end) ? s + (b.end - b.start) : s, 0) + (drIsToday && drLog.currentBreakStart ? Date.now() - drLog.currentBreakStart : 0) : 0;
+    const drJzMs = drLog ? (drLog.jizoSessions || []).reduce((s, j) => (j.start && j.end) ? s + (j.end - j.start) : s, 0) : 0;
+    const drWkMs = Math.max(0, drSesMs - drBrkMs);
+    const drHB = drWkMs > 0 ? Math.round(drRev / (drWkMs / 3600000)) : 0;
+    const drHA = drWkMs > 0 ? Math.round((drRev + drInc) / (drWkMs / 3600000)) : 0;
+    const drHourly = Array.from({ length: 24 }, (_, h) => {
+      const ds = drDels.filter(d => d.orderTime && new Date(d.orderTime).getHours() === h);
       return { name: `${h}`, 件数: ds.reduce((s, d) => s + dc(d), 0) };
     });
-    // Today company pie data
-    const todayPie = COS.map(c => {
-      const rev = todayDels.filter(d => d.company === c.id).reduce((s, d) => s + (d.reward || 0), 0);
+    const drPie = COS.map(c => {
+      const rev = drDels.filter(d => d.company === c.id).reduce((s, d) => s + (d.reward || 0), 0);
       return { name: c.letter, value: rev };
     }).filter(d => d.value > 0);
-
-    // Today insight (1 free)
-    const bestBracket = todayHourly.filter(h => h.件数 > 0).sort((a, b) => b.件数 - a.件数)[0];
+    const bestBracket = drHourly.filter(h => h.件数 > 0).sort((a, b) => b.件数 - a.件数)[0];
 
     return (
       <AnaPage title="📋 デイリーレポート">
-        {/* Summary cards */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
-          <div style={aC}><div style={{ fontSize: sz(10), color: T.textMuted }}>配達件数</div><div style={{ fontSize: sz(24), fontWeight: 800, color: T.accent, marginTop: 2 }}>{todayCnt}件</div></div>
-          <div style={aC}><div style={{ fontSize: sz(10), color: T.textMuted }}>売上合計</div><div style={{ fontSize: sz(24), fontWeight: 800, color: T.accent, marginTop: 2 }}>¥{(todayRev + todayInc).toLocaleString()}</div></div>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
-          <div style={aC}><div style={{ fontSize: sz(10), color: T.textMuted }}>基本時給</div><div style={{ fontSize: sz(22), fontWeight: 800, color: T.accent, marginTop: 2 }}>¥{todayHB.toLocaleString()}</div></div>
-          <div style={aC}><div style={{ fontSize: sz(10), color: T.purple }}>実質時給</div><div style={{ fontSize: sz(22), fontWeight: 800, color: T.purple, marginTop: 2 }}>¥{todayHA.toLocaleString()}</div></div>
+        {/* Date navigation */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+          <button onClick={drPrev} style={{ background: "none", border: "none", cursor: "pointer", fontSize: sz(16), color: T.textSub, padding: "4px 8px" }}>◀</button>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: sz(14), fontWeight: 700, color: T.text }}>{drLabel}（{drDow}）</div>
+            {drIsToday && <div style={{ fontSize: sz(10), color: T.accent, fontWeight: 600 }}>TODAY</div>}
+          </div>
+          <button onClick={drNext} style={{ background: "none", border: "none", cursor: drIsToday ? "default" : "pointer", fontSize: sz(16), color: drIsToday ? T.textFaint : T.textSub, padding: "4px 8px" }}>▶</button>
         </div>
 
-        {/* Today hourly bar chart */}
-        <div style={aC}>
-          <div style={aT2}>今日の時間帯別 配達件数</div>
-          <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
-            <div style={{ width: 700, height: 160 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={todayHourly} margin={{ top: 4, right: 4, bottom: 0, left: -20 }}>
-                  <XAxis dataKey="name" tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} interval={0} />
-                  <YAxis tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} allowDecimals={false} />
-                  <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
-                  <Bar isAnimationActive={false} dataKey="件数" fill={T.accent} radius={[4, 4, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
+        {!drLog || drDels.length === 0 ? (
+          <div style={{ ...aC, textAlign: "center", padding: "24px 14px" }}>
+            <div style={{ fontSize: sz(13), color: T.textDim }}>この日の配達データはありません</div>
           </div>
-          {/* Premium tease */}
-          <div onClick={() => !isPremium && setScreen("ana_hourly")} style={{ fontSize: sz(11), color: T.purple, marginTop: 8, cursor: "pointer" }}>
-            過去30日の時間帯傾向と比較 →
+        ) : (<>
+          {/* Summary cards */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+            <div style={aC}><div style={{ fontSize: sz(10), color: T.textMuted }}>配達件数</div><div style={{ fontSize: sz(24), fontWeight: 800, color: T.accent, marginTop: 2 }}>{drCnt}件</div></div>
+            <div style={aC}><div style={{ fontSize: sz(10), color: T.textMuted }}>売上合計</div><div style={{ fontSize: sz(24), fontWeight: 800, color: T.accent, marginTop: 2 }}>¥{(drRev + drInc).toLocaleString()}</div></div>
           </div>
-        </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
+            <div style={aC}><div style={{ fontSize: sz(10), color: T.textMuted }}>基本時給</div><div style={{ fontSize: sz(22), fontWeight: 800, color: T.accent, marginTop: 2 }}>¥{drHB.toLocaleString()}</div></div>
+            <div style={aC}><div style={{ fontSize: sz(10), color: T.purple }}>実質時給</div><div style={{ fontSize: sz(22), fontWeight: 800, color: T.purple, marginTop: 2 }}>¥{drHA.toLocaleString()}</div></div>
+          </div>
 
-        {/* Today company pie chart */}
-        {todayPie.length > 0 && (
+          {/* Hourly bar chart */}
           <div style={aC}>
-            <div style={aT2}>今日の会社別売上</div>
-            <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-              <ResponsiveContainer width={120} height={120}>
-                <PieChart style={{ pointerEvents: "none" }}>
-                  <Pie isAnimationActive={false} data={todayPie} dataKey="value" cx="50%" cy="50%" outerRadius={50} innerRadius={25} paddingAngle={2} activeIndex={-1} activeShape={null}>
-                    {todayPie.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
-                  </Pie>
-                </PieChart>
-              </ResponsiveContainer>
-              <div>
-                {todayPie.map((d, i) => (
-                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
-                    <div style={{ width: 10, height: 10, borderRadius: 2, background: CHART_COLORS[i % CHART_COLORS.length] }} />
-                    <span style={{ fontSize: sz(12), color: T.text }}>{d.name}</span>
-                    <span style={{ fontSize: sz(12), fontWeight: 700, color: T.text }}>¥{d.value.toLocaleString()}</span>
-                  </div>
-                ))}
+            <div style={aT2}>時間帯別 配達件数</div>
+            <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+              <div style={{ width: 700, height: 160 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={drHourly} margin={{ top: 4, right: 4, bottom: 0, left: -20 }}>
+                    <XAxis dataKey="name" tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} interval={0} />
+                    <YAxis tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} allowDecimals={false} />
+                    <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
+                    <Bar isAnimationActive={false} dataKey="件数" fill={T.accent} radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
               </div>
             </div>
-            <div onClick={() => !isPremium && setScreen("ana_company")} style={{ fontSize: sz(11), color: T.purple, marginTop: 8, cursor: "pointer" }}>
-              会社別の平均単価推移を見る →
-            </div>
           </div>
-        )}
 
-        {/* Free insight (1 only) */}
-        {bestBracket && bestBracket.件数 > 0 && (
-          <div style={{ ...aC, background: T === LIGHT ? "#FFFBEB" : "#1A1810", border: `1px solid ${T === LIGHT ? "#FDE68A" : "#42381A"}` }}>
-            <div style={{ fontSize: sz(13), fontWeight: 700, color: T.accent, marginBottom: 6 }}>💡 今日のポイント</div>
-            <div style={{ fontSize: sz(13), color: T.text, lineHeight: 1.5 }}>⏰ {bestBracket.name}時の配達が最も多い（{bestBracket.件数}件）</div>
-            <div onClick={() => setScreen("ana_hourly")} style={{ fontSize: sz(11), color: T.purple, marginTop: 8, cursor: "pointer" }}>
-              全期間の稼ぎ方ポイントを見る →
-            </div>
-          </div>
-        )}
-
-        {/*稼働info */}
-        <div style={aC}>
-          <div style={aT2}>稼働情報</div>
-          {(() => {
-            const actualDelMs = todayDels.reduce((s, d) => s + (d.completeTime && d.orderTime ? d.completeTime - d.orderTime : 0), 0);
-            const wasteMs = Math.max(0, sesMs - actualDelMs - tBrkMs);
-            return [
-              { l: "稼働時間", v: fd(sesMs), c: T.text, desc: null },
-              { l: "実配達時間", v: fd(actualDelMs), c: "#22C55E", desc: null },
-              { l: "無職時間", v: fd(wasteMs), c: "#EF4444", desc: `うち地蔵 ${fd(tJzMs)}` },
-              { l: "休憩時間", v: fd(tBrkMs), c: T.textMuted, desc: null },
-            ].map((r, i) => (
-              <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 0", borderBottom: i < 3 ? `1px solid ${T.border}` : "none" }}>
+          {/* Company pie chart */}
+          {drPie.length > 0 && (
+            <div style={aC}>
+              <div style={aT2}>会社別売上</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+                <ResponsiveContainer width={120} height={120}>
+                  <PieChart style={{ pointerEvents: "none" }}>
+                    <Pie isAnimationActive={false} data={drPie} dataKey="value" cx="50%" cy="50%" outerRadius={50} innerRadius={25} paddingAngle={2} activeIndex={-1} activeShape={null}>
+                      {drPie.map((_, i) => <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />)}
+                    </Pie>
+                  </PieChart>
+                </ResponsiveContainer>
                 <div>
-                  <span style={{ fontSize: sz(12), color: T.textMuted }}>{r.l}</span>
-                  {r.desc && <span style={{ fontSize: sz(10), color: "#F59E0B", marginLeft: 8 }}>{r.desc}</span>}
+                  {drPie.map((d, i) => (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                      <div style={{ width: 10, height: 10, borderRadius: 2, background: CHART_COLORS[i % CHART_COLORS.length] }} />
+                      <span style={{ fontSize: sz(12), color: T.text }}>{d.name}</span>
+                      <span style={{ fontSize: sz(12), fontWeight: 700, color: T.text }}>¥{d.value.toLocaleString()}</span>
+                    </div>
+                  ))}
                 </div>
-                <span style={{ fontSize: sz(14), fontWeight: 700, color: r.c }}>{r.v}</span>
               </div>
-            ));
-          })()}
-        </div>
+            </div>
+          )}
+
+          {/* Insight */}
+          {bestBracket && bestBracket.件数 > 0 && (
+            <div style={{ ...aC, background: T === LIGHT ? "#FFFBEB" : "#1A1810", border: `1px solid ${T === LIGHT ? "#FDE68A" : "#42381A"}` }}>
+              <div style={{ fontSize: sz(13), fontWeight: 700, color: T.accent, marginBottom: 6 }}>💡 ポイント</div>
+              <div style={{ fontSize: sz(13), color: T.text, lineHeight: 1.5 }}>⏰ {bestBracket.name}時の配達が最も多い（{bestBracket.件数}件）</div>
+            </div>
+          )}
+
+          {/* Work info */}
+          <div style={aC}>
+            <div style={aT2}>稼働情報</div>
+            {(() => {
+              const actualDelMs = drDels.reduce((s, d) => s + (d.completeTime && d.orderTime ? d.completeTime - d.orderTime : 0), 0);
+              const wasteMs = Math.max(0, drSesMs - actualDelMs - drBrkMs);
+              return [
+                { l: "稼働時間", v: fd(drSesMs), c: T.text, desc: null },
+                { l: "実配達時間", v: fd(actualDelMs), c: "#22C55E", desc: null },
+                { l: "無職時間", v: fd(wasteMs), c: "#EF4444", desc: `うち地蔵 ${fd(drJzMs)}` },
+                { l: "休憩時間", v: fd(drBrkMs), c: T.textMuted, desc: null },
+              ].map((r, i) => (
+                <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 0", borderBottom: i < 3 ? `1px solid ${T.border}` : "none" }}>
+                  <div>
+                    <span style={{ fontSize: sz(12), color: T.textMuted }}>{r.l}</span>
+                    {r.desc && <span style={{ fontSize: sz(10), color: "#F59E0B", marginLeft: 8 }}>{r.desc}</span>}
+                  </div>
+                  <span style={{ fontSize: sz(14), fontWeight: 700, color: r.c }}>{r.v}</span>
+                </div>
+              ));
+            })()}
+          </div>
+        </>)}
       </AnaPage>
     );
   }
