@@ -792,7 +792,14 @@ export default function App() {
         });
         setPopup(null);
         // Show otsukare card
-        setOtsukareData({ delCnt: endDelCnt, revenue: endRew, incentive: endInc, total: endAll, hrBase: endHrBase, hrAll: endHrAll, workTime: endWkMs, isNewBest, streak: streak });
+        // Count efficiency rule hits for today
+        const efDels = data.deliveries.filter(d2 => !d2.cancelled && d2.orderTime && d2.completeTime).map(d2 => {
+          const dur = (d2.completeTime - d2.orderTime) / 60000;
+          return { ...d2, perMin: dur > 0 ? (d2.reward || 0) / dur : 0 };
+        });
+        const efAvg = efDels.length > 0 ? efDels.reduce((s, d2) => s + d2.perMin, 0) / efDels.length : 0;
+        const efLowCount = efAvg > 0 ? efDels.filter(d2 => d2.perMin < efAvg * 0.85).length : 0;
+        setOtsukareData({ delCnt: endDelCnt, revenue: endRew, incentive: endInc, total: endAll, hrBase: endHrBase, hrAll: endHrAll, workTime: endWkMs, isNewBest, streak: streak, efLowCount });
       }
     });
   };
@@ -1012,6 +1019,7 @@ export default function App() {
     { key: "weather", label: "🌤️ 天候分析", free: false },
     { key: "trends", label: "📈 推移（週次/月次）", free: false },
     { key: "unitprice", label: "💰 平均単価", free: true },
+    { key: "efficiency", label: "🎯 効率化ポイント", free: true },
   ];
   const MenuEl = menu && (
     <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 200 }} onClick={() => { setMenu(false); setAnaOpen(false); }}>
@@ -2280,6 +2288,305 @@ export default function App() {
     );
   }
 
+  // ═══ EFFICIENCY ANALYSIS ═══
+  if (anaScreen === "efficiency") {
+    const todayDate2 = tds();
+    const isHoliday = (dateStr) => { const d = new Date(dateStr + "T00:00:00"); const dow = d.getDay(); return dow === 0 || dow === 6; };
+    const TIME_SLOTS_EF = [
+      { key: "morning", label: "朝", min: 6, max: 10 },
+      { key: "lunch", label: "昼", min: 11, max: 14 },
+      { key: "afternoon", label: "午後", min: 15, max: 17 },
+      { key: "dinner", label: "夜", min: 18, max: 23 },
+    ];
+    const getSlot = (ts) => { if (!ts) return null; const h = new Date(ts).getHours(); return TIME_SLOTS_EF.find(s => h >= s.min && h <= s.max)?.key || null; };
+    const getDayType = (dateStr) => isHoliday(dateStr) ? "holiday" : "weekday";
+
+    // Build delivery data with context
+    const buildDels = (dels, dateStr) => dels.filter(d => !d.cancelled && d.orderTime && d.completeTime).map(d => {
+      const durMin = (d.completeTime - d.orderTime) / 60000;
+      const perMin = durMin > 0 ? (d.reward || 0) / durMin : 0;
+      return { ...d, durMin, perMin, _date: dateStr, _dayType: getDayType(dateStr), _slot: getSlot(d.orderTime) };
+    });
+
+    const todayDels2 = buildDels(data.deliveries, todayDate2);
+    // Recent 3 days (free tier)
+    const threeDaysAgo = toLD(Date.now() - 2 * 86400000);
+    const recentDels = [
+      ...allLogs.filter(l => l.date >= threeDaysAgo).flatMap(l => buildDels(l.deliveries || [], l.date)),
+      ...todayDels2,
+    ];
+    // All data (premium tier)
+    const allDels2 = [
+      ...allLogs.flatMap(l => buildDels(l.deliveries || [], l.date)),
+      ...todayDels2,
+    ];
+    const totalCount = allDels2.length;
+    const hasEnoughData = totalCount >= 50;
+    const avgPerMin = allDels2.length > 0 ? allDels2.reduce((s, d) => s + d.perMin, 0) / allDels2.length : 0;
+
+    // ─── Rule detection function ───
+    // useDayType: true=平日/土日祝で分ける(PRO), false=分けない(無料)
+    const detectRules = (dels, useDayType = true) => {
+      const rules = [];
+      const avg = dels.length > 0 ? dels.reduce((s, d) => s + d.perMin, 0) / dels.length : 0;
+      if (avg <= 0 || dels.length < 5) return rules;
+
+      // Rule 1: Company × Time (optionally within same dayType)
+      const coTimeMap = {};
+      dels.forEach(d => {
+        if (!d._slot || !d.company) return;
+        const key = useDayType ? `${d.company}|${d._slot}|${d._dayType}` : `${d.company}|${d._slot}`;
+        if (!coTimeMap[key]) coTimeMap[key] = { perMins: [], company: d.company, slot: d._slot, dayType: d._dayType };
+        coTimeMap[key].perMins.push(d.perMin);
+      });
+      Object.values(coTimeMap).forEach(g => {
+        if (g.perMins.length < 5) return;
+        const gAvg = g.perMins.reduce((s, v) => s + v, 0) / g.perMins.length;
+        const diff = (gAvg - avg) / avg;
+        if (diff < -0.15) {
+          const coName = COS.find(c => c.id === g.company)?.name || g.company;
+          const slotLabel = TIME_SLOTS_EF.find(s => s.key === g.slot)?.label || g.slot;
+          const dayLabel = useDayType ? (g.dayType === "holiday" ? "土日祝" : "平日") : "";
+          const totalMin = g.perMins.length * (dels.reduce((s, d) => s + d.durMin, 0) / dels.length);
+          const monthImpact = Math.round((avg - gAvg) * totalMin * (30 / Math.max(1, new Set(dels.map(d => d._date)).size)));
+          rules.push({ type: "company_time", label: `${coName} × ${dayLabel}${slotLabel}`, gAvg: Math.round(gAvg), avg: Math.round(avg), diff: Math.round(diff * 100), count: g.perMins.length, monthImpact, icon: "🏢" });
+        }
+      });
+
+      // Rule 2: Double/Triple trap (same slot + dayType)
+      const slotDayGroups = {};
+      dels.forEach(d => {
+        if (!d._slot) return;
+        const key = `${d._slot}|${d._dayType}`;
+        if (!slotDayGroups[key]) slotDayGroups[key] = { single: [], multi: [] };
+        if (d.orderType === "single") slotDayGroups[key].single.push(d.perMin);
+        else slotDayGroups[key].multi.push(d.perMin);
+      });
+      let multiTotal = 0, multiSum = 0, singleAvgWeighted = 0, singleWeight = 0;
+      Object.values(slotDayGroups).forEach(g => {
+        if (g.single.length >= 3 && g.multi.length >= 3) {
+          const sAvg = g.single.reduce((s, v) => s + v, 0) / g.single.length;
+          const mAvg = g.multi.reduce((s, v) => s + v, 0) / g.multi.length;
+          multiTotal += g.multi.length;
+          multiSum += mAvg * g.multi.length;
+          singleAvgWeighted += sAvg * g.multi.length;
+          singleWeight += g.multi.length;
+        }
+      });
+      if (multiTotal >= 5 && singleWeight > 0) {
+        const mAvg = multiSum / multiTotal;
+        const sAvg = singleAvgWeighted / singleWeight;
+        const diff = (mAvg - sAvg) / sAvg;
+        if (diff < -0.15) {
+          const totalMin = multiTotal * (dels.reduce((s, d) => s + d.durMin, 0) / dels.length);
+          const monthImpact = Math.round((sAvg - mAvg) * totalMin * (30 / Math.max(1, new Set(dels.map(d => d._date)).size)));
+          rules.push({ type: "multi_trap", label: "ダブル・トリプル案件", gAvg: Math.round(mAvg), avg: Math.round(sAvg), diff: Math.round(diff * 100), count: multiTotal, monthImpact, icon: "📦" });
+        }
+      }
+
+      // Rule 3: Overtime cliff (compare first half vs second half of session)
+      const daySessionDels = {};
+      dels.forEach(d => {
+        if (!daySessionDels[d._date]) daySessionDels[d._date] = [];
+        daySessionDels[d._date].push(d);
+      });
+      let firstHalfPMs = [], secondHalfPMs = [];
+      Object.values(daySessionDels).forEach(dayDels => {
+        if (dayDels.length < 4) return;
+        const sorted = [...dayDels].sort((a, b) => a.orderTime - b.orderTime);
+        const mid = Math.floor(sorted.length / 2);
+        sorted.slice(0, mid).forEach(d => firstHalfPMs.push(d.perMin));
+        sorted.slice(mid).forEach(d => secondHalfPMs.push(d.perMin));
+      });
+      if (firstHalfPMs.length >= 10 && secondHalfPMs.length >= 10) {
+        const fAvg = firstHalfPMs.reduce((s, v) => s + v, 0) / firstHalfPMs.length;
+        const sAvg2 = secondHalfPMs.reduce((s, v) => s + v, 0) / secondHalfPMs.length;
+        const diff = (sAvg2 - fAvg) / fAvg;
+        if (diff < -0.15) {
+          rules.push({ type: "overtime", label: "稼働後半の効率低下", gAvg: Math.round(sAvg2), avg: Math.round(fAvg), diff: Math.round(diff * 100), count: secondHalfPMs.length, monthImpact: Math.round((fAvg - sAvg2) * secondHalfPMs.length * (30 / Math.max(1, Object.keys(daySessionDels).length))), icon: "⏰" });
+        }
+      }
+
+      // Rule 4: Low reward trap
+      const rewardThresholds = [300, 400, 500];
+      for (const thresh of rewardThresholds) {
+        const lowDels = dels.filter(d => (d.reward || 0) <= thresh);
+        const highDels = dels.filter(d => (d.reward || 0) > thresh);
+        if (lowDels.length >= 5 && highDels.length >= 5) {
+          const lowAvg = lowDels.reduce((s, d) => s + d.perMin, 0) / lowDels.length;
+          const highAvg = highDels.reduce((s, d) => s + d.perMin, 0) / highDels.length;
+          const diff = (lowAvg - highAvg) / highAvg;
+          if (diff < -0.15) {
+            const totalMin = lowDels.reduce((s, d) => s + d.durMin, 0);
+            const monthImpact = Math.round((highAvg - lowAvg) * totalMin * (30 / Math.max(1, new Set(dels.map(d => d._date)).size)));
+            rules.push({ type: "low_reward", label: `報酬¥${thresh}以下の配達`, gAvg: Math.round(lowAvg), avg: Math.round(highAvg), diff: Math.round(diff * 100), count: lowDels.length, monthImpact, icon: "💸" });
+            break;
+          }
+        }
+      }
+
+      // Rule 5: Area inefficiency
+      const areaMap = {};
+      dels.forEach(d => {
+        if (!d.areaName) return;
+        if (!areaMap[d.areaName]) areaMap[d.areaName] = [];
+        areaMap[d.areaName].push(d.perMin);
+      });
+      Object.entries(areaMap).forEach(([area, pms]) => {
+        if (pms.length < 5) return;
+        const aAvg = pms.reduce((s, v) => s + v, 0) / pms.length;
+        const diff = (aAvg - avg) / avg;
+        if (diff < -0.15) {
+          const totalMin = pms.length * (dels.reduce((s, d) => s + d.durMin, 0) / dels.length);
+          const monthImpact = Math.round((avg - aAvg) * totalMin * (30 / Math.max(1, new Set(dels.map(d => d._date)).size)));
+          rules.push({ type: "area", label: `${area}エリア`, gAvg: Math.round(aAvg), avg: Math.round(avg), diff: Math.round(diff * 100), count: pms.length, monthImpact, icon: "📍" });
+        }
+      });
+
+      return rules.sort((a, b) => b.monthImpact - a.monthImpact);
+    };
+
+    const recentRules = detectRules(recentDels, false); // 無料: 直近3日、平日/土日祝区別なし
+    const allRules = hasEnoughData ? detectRules(allDels2, true) : []; // PRO: 全期間、平日/土日祝区別あり
+    const totalMonthImpact = allRules.reduce((s, r) => s + r.monthImpact, 0);
+
+    // Count today's deliveries that match all-time rules
+    const todayRuleHits = allRules.reduce((count, rule) => {
+      return count + todayDels2.filter(d => {
+        if (rule.type === "company_time") {
+          const [co, slot, dayType] = rule.label.split(" × ");
+          const coId = COS.find(c => c.name === co.replace(/ × .*/, ""))?.id;
+          return d.company === coId && d._slot === slot && d._dayType === dayType;
+        }
+        if (rule.type === "multi_trap") return d.orderType !== "single";
+        if (rule.type === "low_reward") {
+          const thresh = parseInt(rule.label.match(/\d+/)?.[0] || "0", 10);
+          return (d.reward || 0) <= thresh;
+        }
+        if (rule.type === "area") return d.areaName === rule.label.replace("エリア", "");
+        return false;
+      }).length;
+    }, 0);
+
+    const RuleCard = ({ rule }) => (
+      <div style={{ ...aC, padding: "14px 16px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <div style={{ fontSize: sz(14), fontWeight: 700, color: T.text }}>{rule.icon} {rule.label}</div>
+          <div style={{ fontSize: sz(11), color: T.textDim }}>{rule.count}件</div>
+        </div>
+        <div style={{ display: "flex", gap: 12, marginBottom: 8 }}>
+          <div style={{ flex: 1, background: "#EF444418", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
+            <div style={{ fontSize: sz(9), color: "#EF4444", marginBottom: 2 }}>この条件</div>
+            <div style={{ fontSize: sz(16), fontWeight: 800, color: "#EF4444" }}>¥{rule.gAvg}<span style={{ fontSize: sz(9) }}>/分</span></div>
+          </div>
+          <div style={{ flex: 1, background: "#22C55E18", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
+            <div style={{ fontSize: sz(9), color: "#22C55E", marginBottom: 2 }}>{rule.type === "multi_trap" ? "シングル" : rule.type === "overtime" ? "前半" : "全体平均"}</div>
+            <div style={{ fontSize: sz(16), fontWeight: 800, color: "#22C55E" }}>¥{rule.avg}<span style={{ fontSize: sz(9) }}>/分</span></div>
+          </div>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ fontSize: sz(12), color: "#EF4444", fontWeight: 700 }}>{rule.diff}%</div>
+          <div style={{ fontSize: sz(12), color: T.textMuted }}>改善で月 <span style={{ fontWeight: 700, color: "#22C55E" }}>+¥{rule.monthImpact.toLocaleString()}</span></div>
+        </div>
+      </div>
+    );
+
+    return (
+      <AnaPage title="🎯 効率化ポイント">
+        {/* Free: Recent 3 days summary */}
+        <div style={aC}>
+          <div style={aT2}>直近3日の効率分析</div>
+          {recentDels.length === 0 ? (
+            <div style={{ fontSize: sz(12), color: T.textDim, textAlign: "center", padding: "12px 0" }}>配達データがありません</div>
+          ) : recentDels.length < 5 ? (
+            <div style={{ fontSize: sz(12), color: T.textDim, textAlign: "center", padding: "12px 0" }}>あと{5 - recentDels.length}件で分析を開始します</div>
+          ) : (
+            <>
+              <div style={{ display: "flex", justifyContent: "space-around", marginBottom: 8 }}>
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontSize: sz(10), color: T.textDim }}>平均分給</div>
+                  <div style={{ fontSize: sz(20), fontWeight: 800, color: T.accent }}>¥{Math.round(recentDels.reduce((s, d) => s + d.perMin, 0) / recentDels.length)}<span style={{ fontSize: sz(10) }}>/分</span></div>
+                </div>
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontSize: sz(10), color: T.textDim }}>配達件数</div>
+                  <div style={{ fontSize: sz(20), fontWeight: 800, color: T.text }}>{recentDels.length}件</div>
+                </div>
+              </div>
+              {recentRules.length > 0 ? (
+                <>
+                  <div style={{ fontSize: sz(11), color: "#F59E0B", fontWeight: 600, marginBottom: 6 }}>⚠ 改善ポイント</div>
+                  {recentRules.slice(0, 3).map((r, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderTop: i > 0 ? `1px solid ${T.border}` : "none" }}>
+                      <span style={{ fontSize: sz(12), color: T.text }}>{r.icon} {r.label}</span>
+                      <span style={{ fontSize: sz(12), color: "#EF4444", fontWeight: 600 }}>{r.diff}%</span>
+                    </div>
+                  ))}
+                </>
+              ) : (
+                <div style={{ fontSize: sz(12), color: "#22C55E", textAlign: "center", fontWeight: 600 }}>効率的に配達できています</div>
+              )}
+              <div style={{ fontSize: sz(9), color: T.textFaint, textAlign: "center", marginTop: 8, lineHeight: 1.5 }}>📊 直近3日のデータに基づく分析です（平日/土日祝の区別なし）</div>
+            </>
+          )}
+        </div>
+
+        {/* Premium: All-time rules with weekday/holiday separation */}
+        {hasEnoughData ? (
+          isPremium ? (<>
+            {/* My Rules */}
+            {allRules.length > 0 && (
+              <div style={{ ...aC, background: T === LIGHT ? "#FFFBEB" : "#1A1810", border: `1px solid ${T === LIGHT ? "#FDE68A" : "#42381A"}` }}>
+                <div style={{ fontSize: sz(14), fontWeight: 700, color: "#F59E0B", marginBottom: 8 }}>📋 あなたの効率化ルール</div>
+                {allRules.slice(0, 5).map((r, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderTop: i > 0 ? `1px solid ${T === LIGHT ? "#FDE68A44" : "#42381A"}` : "none" }}>
+                    <div>
+                      <span style={{ fontSize: sz(12), color: T.text, fontWeight: 600 }}>{i + 1}. {r.icon} {r.label}を避ける</span>
+                    </div>
+                    <span style={{ fontSize: sz(12), fontWeight: 700, color: "#22C55E" }}>+¥{r.monthImpact.toLocaleString()}/月</span>
+                  </div>
+                ))}
+                <div style={{ borderTop: `1px solid ${T === LIGHT ? "#FDE68A" : "#42381A"}`, paddingTop: 10, marginTop: 4, display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ fontSize: sz(13), fontWeight: 700, color: T.text }}>全ルール適用で</span>
+                  <span style={{ fontSize: sz(15), fontWeight: 800, color: "#22C55E" }}>+¥{totalMonthImpact.toLocaleString()}/月</span>
+                </div>
+              </div>
+            )}
+
+            {/* Detailed cards */}
+            <div style={{ fontSize: sz(12), color: T.textDim, fontWeight: 600, marginBottom: 6, marginTop: 4 }}>詳細分析</div>
+            {allRules.length > 0 ? allRules.map((r, i) => <RuleCard key={i} rule={r} />) : (
+              <div style={{ ...aC, textAlign: "center" }}>
+                <div style={{ fontSize: sz(13), color: "#22C55E", fontWeight: 700 }}>大きな非効率パターンは検出されませんでした</div>
+                <div style={{ fontSize: sz(11), color: T.textDim, marginTop: 4 }}>効率的に配達できています</div>
+              </div>
+            )}
+            <div style={{ fontSize: sz(10), color: T.textFaint, textAlign: "center", marginTop: 8 }}>平日/土日祝 × 時間帯で補正して比較（{totalCount}件）</div>
+          </>) : (<>
+            <PremiumBlur>
+              <div style={{ ...aC, background: T === LIGHT ? "#FFFBEB" : "#1A1810" }}>
+                <div style={{ fontSize: sz(14), fontWeight: 700, color: "#F59E0B", marginBottom: 8 }}>📋 あなたの効率化ルール</div>
+                <div style={{ padding: "20px 0" }} />
+              </div>
+              <div style={aC}><div style={{ padding: "40px 0" }} /></div>
+              <div style={aC}><div style={{ padding: "40px 0" }} /></div>
+            </PremiumBlur>
+            <div style={{ textAlign: "center", marginTop: 4 }}>
+              <div style={{ fontSize: sz(11), color: T.purple, fontWeight: 600 }}>平日/土日祝を分けた高精度分析 → PRO</div>
+            </div>
+          </>)
+        ) : (
+          <div style={{ ...aC, textAlign: "center" }}>
+            <div style={{ fontSize: sz(13), color: T.textDim, marginBottom: 4 }}>📊 全期間分析のデータ収集中...</div>
+            <div style={{ fontSize: sz(12), color: T.textMuted }}>あと<span style={{ fontWeight: 700, color: T.accent }}>{Math.max(0, 50 - totalCount)}件</span>で効率化ルールが解放されます</div>
+            <div style={{ height: 6, background: T.barBg, borderRadius: 3, marginTop: 10, overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${Math.min(100, totalCount / 50 * 100)}%`, background: T.accent, borderRadius: 3 }} />
+            </div>
+          </div>
+        )}
+      </AnaPage>
+    );
+  }
+
   // ═══ AREA ANALYSIS (PREMIUM) ═══
   if (anaScreen === "area") {
     // Filter constants (same as heatmap)
@@ -2953,6 +3260,12 @@ export default function App() {
               <div><div style={{ fontSize: sz(10), color: T.textDim }}>連続稼働</div><div style={{ fontSize: sz(14), fontWeight: 700, color: "#F59E0B" }}>{otsukareData.streak}日</div></div>
             </div>
 
+            {otsukareData.efLowCount > 0 && (
+              <div style={{ background: "#F59E0B18", borderRadius: 10, padding: "8px 12px", marginBottom: 12, textAlign: "left" }}>
+                <div style={{ fontSize: sz(11), color: "#F59E0B", fontWeight: 600 }}>🎯 効率化ポイント</div>
+                <div style={{ fontSize: sz(11), color: T.textMuted, marginTop: 2 }}>今日の配達で平均より低効率な配達が<span style={{ fontWeight: 700, color: "#F59E0B" }}>{otsukareData.efLowCount}件</span>ありました</div>
+              </div>
+            )}
             <button onClick={() => { setOtsukareData(null); if (weeklyReviewData) setWeeklyReview(weeklyReviewData); }} style={{ width: "100%", height: 48, borderRadius: 12, border: "none", background: T.accent, color: "#000", fontSize: sz(15), fontWeight: 700, cursor: "pointer", fontFamily: FN }}>閉じる</button>
           </div>
         </div>
