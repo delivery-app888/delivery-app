@@ -1009,6 +1009,7 @@ export default function App() {
   // ─── Menu overlay ───
   const anaItems = [
     { key: "daily", label: "📋 デイリーレポート", free: true },
+    { key: "efficiency", label: "🎯 効率化ポイント", free: true },
     { key: "heatmap", label: "📍 注文ヒートマップ", free: true },
     { key: "highvalue", label: "💎 高単価配達マップ", free: true },
     { key: "hourly", label: "⏰ 時間帯分析", free: true },
@@ -1019,7 +1020,6 @@ export default function App() {
     { key: "weather", label: "🌤️ 天候分析", free: false },
     { key: "trends", label: "📈 推移（週次/月次）", free: false },
     { key: "unitprice", label: "💰 平均単価", free: true },
-    { key: "efficiency", label: "🎯 効率化ポイント", free: true },
   ];
   const MenuEl = menu && (
     <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 200 }} onClick={() => { setMenu(false); setAnaOpen(false); }}>
