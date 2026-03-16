@@ -5,7 +5,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { DARK, LIGHT } from "./themes";
 import { WEATHER, COS, OT, NP, FN, BH, BBH } from "./constants";
-import { tds, toLD, ms, sv, lt, la, lg, sg, ls, ss, getPos, fetchWeather, ft, fd, fm, dc, newDay, defaultSettings, migrate, dayRev, reverseGeocode } from "./utils";
+import { tds, toLD, ms, sv, svByDate, lt, la, lg, sg, ls, ss, getPos, fetchWeather, ft, fd, fm, dc, newDay, defaultSettings, migrate, dayRev, reverseGeocode } from "./utils";
 import { generateDemoLogs } from "./demoData";
 
 // ─── AutoFitText ───
@@ -305,14 +305,14 @@ export default function App() {
     if (screen !== "ana_highvalue" || !hvLayerRef.current) return;
     hvLayerRef.current.clearLayers();
     const allD = [
-      ...allLogs.flatMap(l => (l.deliveries || []).filter(d2 => d2.startLat && !d2.cancelled).map(d2 => ({ ...d2, _date: l.date }))),
-      ...data.deliveries.filter(d2 => d2.startLat && !d2.cancelled).map(d2 => ({ ...d2, _date: data.date })),
+      ...allLogs.flatMap(l => (l.deliveries || []).filter(d2 => d2.startLat && !d2.cancelled && d2.company !== "pickgo" && (d2.reward || 0) >= 1000).map(d2 => ({ ...d2, _date: l.date, _delIdx: (l.deliveries || []).indexOf(d2) }))),
+      ...data.deliveries.filter(d2 => d2.startLat && !d2.cancelled && d2.company !== "pickgo" && (d2.reward || 0) >= 1000).map(d2 => ({ ...d2, _date: data.date, _delIdx: data.deliveries.indexOf(d2) })),
     ];
     const fT = (t2) => { if (!t2) return ""; const dt2 = new Date(t2); return `${dt2.getHours()}:${String(dt2.getMinutes()).padStart(2, "0")}`; };
     let pinCount = 0;
     // Draw in order: 100+ first (bottom), then 200+, then 300+ (top)
     const tiers = [
-      { min: 100, max: 200, color: "#22C55E", radius: 6 },
+      { min: 100, max: 200, color: "#3B82F6", radius: 6 },
       { min: 200, max: 300, color: "#F59E0B", radius: 7 },
       { min: 300, max: Infinity, color: "#EF4444", radius: 8 },
     ];
@@ -323,10 +323,23 @@ export default function App() {
         if (durMin <= 0) return;
         const perMin = (d2.reward || 0) / durMin;
         if (perMin >= tier.min && perMin < tier.max) {
-          const co2 = d2.company || "不明";
-          L.circleMarker([d2.startLat, d2.startLng], { radius: tier.radius, color: tier.color, fillColor: tier.color, fillOpacity: 0.75, weight: 2 })
-            .bindPopup(`<b>¥${Math.round(perMin)}/分</b><br/>${co2} ¥${(d2.reward || 0).toLocaleString()}<br/>${fT(d2.orderTime)} (${Math.round(durMin)}分)<br/>${d2._date}<br/><span style="color:#888">📝 ${d2.memo ? d2.memo.replace(/</g,'&lt;').replace(/>/g,'&gt;') : 'メモなし'}</span>`)
+          const co = COS.find(cc => cc.id === d2.company);
+          const marker = L.circleMarker([d2.startLat, d2.startLng], { radius: tier.radius, color: tier.color, fillColor: tier.color, fillOpacity: 0.75, weight: 2 })
+            .bindPopup(`<b>¥${Math.round(perMin)}/分</b><br/>${co?.name || "不明"} ¥${(d2.reward || 0).toLocaleString()}<br/>${fT(d2.orderTime)} (${Math.round(durMin)}分)<br/>${d2._date}<br/><span style="color:#888">📝 ${d2.memo ? d2.memo.replace(/</g,'&lt;').replace(/>/g,'&gt;') : 'メモなし'}</span>`)
             .addTo(hvLayerRef.current);
+          marker.on("click", () => {
+            const isToday = d2._date === tds();
+            if (isToday) {
+              openEdit(d2._delIdx);
+            } else {
+              setScreen("history");
+              setTimeout(() => {
+                setHistExpanded({ [d2._date]: true });
+                const log = allLogs.find(l => l.date === d2._date);
+                if (log) setHistDetail({ delivery: d2, date: d2._date, delIdx: d2._delIdx });
+              }, 50);
+            }
+          });
           pinCount++;
         }
       });
@@ -441,11 +454,11 @@ export default function App() {
       if (d2.areaName && !cells[key].names.includes(d2.areaName)) cells[key].names.push(d2.areaName);
     });
     const hourlyToColor = (h) => {
-      if (h >= 2000) return "#16A34A";
-      if (h >= 1500) return "#22C55E";
+      if (h >= 2000) return "#EF4444";
+      if (h >= 1500) return "#F59E0B";
       if (h >= 1200) return "#EAB308";
-      if (h >= 900)  return "#F59E0B";
-      return "#EF4444";
+      if (h >= 900)  return "#60A5FA";
+      return "#3B82F6";
     };
     aaLayerRef.current.clearLayers();
     Object.values(cells).forEach(c => {
@@ -575,6 +588,10 @@ export default function App() {
   // ─── Cumulative stats (for milestones) ───
   const cumDels = allLogs.reduce((s, l) => s + (l.deliveries || []).filter(d => !d.cancelled).reduce((s2, d) => s2 + dc(d), 0), 0) + delCnt;
   const cumRev = allLogs.reduce((s, l) => s + dayRev(l, false), 0) + totRew;
+
+  // ─── Average unit price (delivery-count based, with past fallback) ───
+  const pastAvgUnit = (() => { let r = 0, c = 0; allLogs.forEach(l => { const ds = (l.deliveries || []).filter(d => !d.cancelled); r += ds.reduce((s, d) => s + (d.reward || 0), 0); c += ds.length; }); return c > 0 ? Math.round(r / c) : 500; })();
+  const avgUnitForGuide = actDels.length > 0 ? Math.round(totRew / actDels.length) : pastAvgUnit;
 
   // ─── Action feedback toast ───
   const [actionToast, setActionToast] = useState(null);
@@ -753,13 +770,13 @@ export default function App() {
       // Show today's guide after weather chance
       if (dailyTarget > 0) {
         setTimeout(() => {
-          const estDels2 = dailyTarget > 0 ? Math.ceil(todayRemaining / (totRew > 0 && delCnt > 0 ? Math.round(totRew / delCnt) : 500)) : 0;
+          const estDels2 = Math.ceil(todayRemaining / avgUnitForGuide);
           setTodayGuide({ target: dailyTarget, remaining: todayRemaining, estDels: estDels2 });
           setTimeout(() => setTodayGuide(null), 4000);
         }, 5000);
       }
     } else if (dailyTarget > 0) {
-      const estDels = dailyTarget > 0 ? Math.ceil(todayRemaining / (totRew > 0 && delCnt > 0 ? Math.round(totRew / delCnt) : 500)) : 0;
+      const estDels = Math.ceil(todayRemaining / avgUnitForGuide);
       setTodayGuide({ target: dailyTarget, remaining: todayRemaining, estDels });
       setTimeout(() => setTodayGuide(null), 4000);
     }
@@ -830,8 +847,12 @@ export default function App() {
   const doCmp = () => { if (!hasOrd) return; setRwCo(null); setRwAmt(""); setRwInc(""); setRwField("reward"); setRwType("single"); setRwRating(null); setScreen("reward"); pulse("complete"); };
   const doRwOk = async () => {
     if (!rwCo || !rwAmt) return;
-    const rew = parseInt(rwAmt, 10) || 0;
+    const rawRew = parseInt(rwAmt, 10) || 0;
     const inc = parseInt(rwInc, 10) || 0;
+    // PickGo fee deduction
+    const isPickgo = rwCo === "pickgo";
+    const feeRate = isPickgo ? (settings.pickgoFeeRate || 15) : 0;
+    const rew = isPickgo ? Math.round(rawRew * (1 - feeRate / 100)) : rawRew;
     // Auto-rating: compare reward to rolling average
     const avgUnit = delCnt > 0 ? Math.round(totRew / delCnt) : 500;
     let autoRating = "normal";
@@ -844,7 +865,7 @@ export default function App() {
       const aw = d.currentOrderWeather || null;
       d.deliveries.push({
         orderTime: d.currentOrderTime, completeTime: Date.now(), company: rwCo,
-        reward: rew, incentive: inc, orderType: rwType, cancelled: false,
+        reward: rew, rawReward: isPickgo ? rawRew : undefined, incentive: inc, orderType: rwType, cancelled: false,
         rating: finalRating,
         startLat: sp?.lat || null, startLng: sp?.lng || null,
         endLat: endPos?.lat || null, endLng: endPos?.lng || null,
@@ -867,7 +888,7 @@ export default function App() {
     const newDelCnt = delCnt + (rwType === "double" ? 2 : rwType === "triple" ? 3 : 1);
     const elapsed = data.currentOrderTime ? Date.now() - data.currentOrderTime : 0;
     const elMin = Math.round(elapsed / 60000);
-    const avgUnit2 = delCnt > 0 ? Math.round(totRew / delCnt) : 500;
+    const avgUnit2 = avgUnitForGuide;
     const diff = rew - avgUnit2;
     // Choose feedback type
     let fb = null;
@@ -937,7 +958,7 @@ export default function App() {
         setTimeout(() => setWeatherChance(null), 4500);
         if (dailyTarget > 0) {
           setTimeout(() => {
-            const estDels2 = Math.ceil(todayRemaining / (totRew > 0 && delCnt > 0 ? Math.round(totRew / delCnt) : 500));
+            const estDels2 = Math.ceil(todayRemaining / avgUnitForGuide);
             setTodayGuide({ target: dailyTarget, remaining: todayRemaining, estDels: estDels2 });
             setTimeout(() => setTodayGuide(null), 4000);
           }, 5000);
@@ -946,7 +967,7 @@ export default function App() {
       }
     }
     if (dailyTarget > 0) {
-      const estDels = dailyTarget > 0 ? Math.ceil(todayRemaining / (totRew > 0 && delCnt > 0 ? Math.round(totRew / delCnt) : 500)) : 0;
+      const estDels = dailyTarget > 0 ? Math.ceil(todayRemaining / avgUnitForGuide) : 0;
       setTodayGuide({ target: dailyTarget, remaining: todayRemaining, estDels });
       setTimeout(() => setTodayGuide(null), 4000);
     }
@@ -1204,6 +1225,7 @@ export default function App() {
             {perMin > 0 && !editData.cancelled && <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>分給</span><span style={{ fontSize: sz(15), fontWeight: 700, color: "#0EA5E9" }}>¥{perMin.toLocaleString()}/分</span></div>}
           </>); })()}
           <div onClick={() => setEditField("reward")} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}`, cursor: "pointer" }}><span style={{ fontSize: sz(13), color: T.textMuted }}>配達報酬</span><span style={{ fontSize: sz(17), fontWeight: 700, color: T.accent }}>¥{(editData.reward || 0).toLocaleString()} ✎</span></div>
+          {editData.rawReward && <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0 7px" }}><span style={{ fontSize: sz(11), color: T.textDim }}>PickGo 入力金額</span><span style={{ fontSize: sz(13), color: T.textMuted }}>¥{editData.rawReward.toLocaleString()}（手数料{Math.round((1 - editData.reward / editData.rawReward) * 100)}%引き）</span></div>}
           <div onClick={() => setEditField("incentive")} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}`, cursor: "pointer" }}><span style={{ fontSize: sz(13), color: T.textMuted }}>インセンティブ</span><span style={{ fontSize: sz(17), fontWeight: 700, color: T.purple }}>¥{(editData.incentive || 0).toLocaleString()} ✎</span></div>
           <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8 }}><div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 5 }}>会社</div><div style={{ display: "flex", gap: 7 }}>{COS.map(cc => (<button key={cc.id} onClick={() => setEditData({ ...editData, company: cc.id })} style={{ width: 40, height: 40, borderRadius: 10, border: editData.company === cc.id ? `2px solid ${T.text}` : `1.5px solid ${T.borderLight}`, background: editData.company === cc.id ? T.inputBg : cc.bg, color: "#FFF", fontSize: sz(16), fontWeight: 800, cursor: "pointer", fontFamily: FN }}>{cc.letter}</button>))}</div></div>
           <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginTop: 8 }}><div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 5 }}>タイプ</div><div style={{ display: "flex", gap: 6 }}>{OT.map(ot => (<button key={ot.id} onClick={() => setEditData({ ...editData, orderType: ot.id })} style={{ flex: 1, padding: "6px 0", borderRadius: 7, border: editData.orderType === ot.id ? `2px solid ${T.accent}` : `1.5px solid ${T.borderLight}`, background: editData.orderType === ot.id ? `${T.accent}20` : T.card, color: editData.orderType === ot.id ? T.accent : T.textMuted, fontSize: sz(12), fontWeight: 600, cursor: "pointer", fontFamily: FN }}>{ot.label}</button>))}</div></div>
@@ -1316,6 +1338,30 @@ export default function App() {
           </div>
           <div style={{ fontSize: sz(11), color: T.textMuted, textAlign: "center", marginTop: 8 }}>
             週{(settings.workDays || [1, 2, 3, 4, 5]).length}日稼働
+          </div>
+        </div>
+        {/* PickGo手数料設定 */}
+        <div style={{ background: T.card, borderRadius: 14, padding: "4px 18px", border: `1px solid ${T.border}`, marginTop: 16 }}>
+          <div style={{ fontSize: sz(12), color: T.textDim, fontWeight: 600, padding: "12px 0 4px", letterSpacing: 1 }}>PickGo 手数料</div>
+          <div style={{ fontSize: sz(11), color: T.textMuted, lineHeight: 1.6, marginBottom: 8 }}>配達完了時にPickGoを選択すると、入力金額から手数料を自動で差し引いて記録します。</div>
+          <div style={{ display: "flex", gap: 8, paddingBottom: 12 }}>
+            {[{ rate: 15, label: "15%", sub: "25万円未満" }, { rate: 10, label: "10%", sub: "25万円以上" }].map(opt => {
+              const sel = (settings.pickgoFeeRate || 15) === opt.rate;
+              return (
+                <button key={opt.rate} onClick={() => updateSettings({ pickgoFeeRate: opt.rate })} style={{
+                  flex: 1, padding: "10px 0", borderRadius: 10,
+                  border: sel ? `2px solid ${T.accent}` : `1px solid ${T.borderLight}`,
+                  background: sel ? (T.accent + "22") : T.inputBg,
+                  color: sel ? T.accent : T.textMuted,
+                  fontSize: sz(16), fontWeight: 700,
+                  cursor: "pointer", fontFamily: FN,
+                  display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+                }}>
+                  <span>{opt.label}</span>
+                  <span style={{ fontSize: sz(10), fontWeight: 500, color: sel ? T.accent : T.textDim }}>{opt.sub}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
         <div style={{ background: T.card, borderRadius: 14, padding: "12px 18px", border: `1px solid ${T.border}`, marginTop: 16 }}>
@@ -2677,11 +2723,11 @@ export default function App() {
       .map(c => ({ ...c, hourly: Math.round(c.totalRev / (c.totalMs / 3600000)) }))
       .sort((a, b) => b.hourly - a.hourly);
     const hourlyToColor2 = (h) => {
-      if (h >= 2000) return "#16A34A";
-      if (h >= 1500) return "#22C55E";
+      if (h >= 2000) return "#EF4444";
+      if (h >= 1500) return "#F59E0B";
       if (h >= 1200) return "#EAB308";
-      if (h >= 900)  return "#F59E0B";
-      return "#EF4444";
+      if (h >= 900)  return "#60A5FA";
+      return "#3B82F6";
     };
 
     // Dropdown helpers
@@ -2768,7 +2814,7 @@ export default function App() {
               <div style={{ fontSize: sz(12), fontWeight: 700, color: T.accent }}>{allDels2.length}<span style={{ fontSize: sz(9), color: T.textMuted, fontWeight: 500 }}> 件</span></div>
             </div>
             <div style={{ display: "flex", height: 8, borderRadius: 4, overflow: "hidden", marginBottom: 4 }}>
-              {["#EF4444","#F59E0B","#EAB308","#22C55E","#16A34A"].map((c,i) => <div key={i} style={{ flex: 1, background: c }} />)}
+              {["#3B82F6","#60A5FA","#EAB308","#F59E0B","#EF4444"].map((c,i) => <div key={i} style={{ flex: 1, background: c }} />)}
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", fontSize: sz(9), color: T.textDim }}>
               <span>〜¥900</span><span>¥1,200</span><span>¥1,500</span><span>¥2,000+</span>
@@ -2845,7 +2891,7 @@ export default function App() {
           <div style={{ position: "absolute", top: 10, left: 10, right: 10, zIndex: 1000 }}>
             <div style={{ display: "flex", gap: 4 }}>
               {[
-                { label: "¥100〜199/分", color: "#22C55E" },
+                { label: "¥100〜199/分", color: "#3B82F6" },
                 { label: "¥200〜299/分", color: "#F59E0B" },
                 { label: "¥300+/分", color: "#EF4444" },
               ].map(opt => (
@@ -3070,6 +3116,7 @@ export default function App() {
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>所要時間</span><span style={{ fontSize: sz(14), fontWeight: 600, color: T.text }}>{fm(dur)}</span></div>
               {perMin > 0 && !d.cancelled && <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>分給</span><span style={{ fontSize: sz(15), fontWeight: 700, color: "#0EA5E9" }}>¥{perMin.toLocaleString()}/分</span></div>}
               <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}` }}><span style={{ fontSize: sz(13), color: T.textMuted }}>配達報酬</span><span style={{ fontSize: sz(17), fontWeight: 700, color: T.accent }}>¥{(d.reward || 0).toLocaleString()}</span></div>
+              {d.rawReward && <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0 7px" }}><span style={{ fontSize: sz(11), color: T.textDim }}>PickGo 入力金額</span><span style={{ fontSize: sz(13), color: T.textMuted }}>¥{d.rawReward.toLocaleString()}（手数料{Math.round((1 - d.reward / d.rawReward) * 100)}%引き）</span></div>}
               {(d.incentive || 0) > 0 && <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}` }}><span style={{ fontSize: sz(13), color: T.textMuted }}>インセンティブ</span><span style={{ fontSize: sz(17), fontWeight: 700, color: T.purple }}>¥{(d.incentive || 0).toLocaleString()}</span></div>}
               {d.rating && !d.cancelled && (
                 <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}` }}>
@@ -3106,6 +3153,36 @@ export default function App() {
                   </div>
                 </div>
               )}
+              {/* Memo - editable for past deliveries */}
+              <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginTop: 4 }}>
+                <div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 5 }}>📝 メモ</div>
+                <textarea
+                  value={d.memo || ""}
+                  onChange={(e) => {
+                    const newMemo = e.target.value;
+                    setHistDetail(prev => ({ ...prev, delivery: { ...prev.delivery, memo: newMemo } }));
+                  }}
+                  placeholder="配達に関するメモを入力..."
+                  style={{
+                    width: "100%", minHeight: 60, maxHeight: 120, borderRadius: 8,
+                    border: `1px solid ${T.borderLight}`, background: T.inputBg,
+                    color: T.text, fontSize: sz(13), padding: "8px 10px",
+                    fontFamily: FN, resize: "vertical", lineHeight: 1.5,
+                    boxSizing: "border-box",
+                  }}
+                />
+                <button onClick={async () => {
+                  const log = allLogs.find(l => l.date === histDetail.date);
+                  if (!log || histDetail.delIdx == null) return;
+                  log.deliveries[histDetail.delIdx].memo = d.memo || "";
+                  await svByDate(histDetail.date, log);
+                  setAllLogs(prev => prev.map(l => l.date === histDetail.date ? { ...log } : l));
+                  setHistDetail(prev => ({ ...prev, saved: true }));
+                  setTimeout(() => setHistDetail(prev => prev ? ({ ...prev, saved: false }) : null), 1500);
+                }} style={{ width: "100%", height: 40, borderRadius: 10, border: "none", background: T.accent, color: "#000", fontSize: sz(14), fontWeight: 700, cursor: "pointer", fontFamily: FN, marginTop: 6, letterSpacing: 1 }}>
+                  {histDetail.saved ? "✓ 保存しました" : "メモを保存"}
+                </button>
+              </div>
             </div>
           </div>
           </div>
@@ -3185,7 +3262,7 @@ export default function App() {
                             const durMin = dur > 0 ? dur / 60000 : 0;
                             const perMin = durMin > 0 ? Math.round((d.reward || 0) / durMin) : 0;
                             return (
-                              <div key={i} onClick={() => setHistDetail({ delivery: d, date: log.date })} style={{ display: "flex", alignItems: "center", gap: 0, padding: "7px 0", borderBottom: i < dels.length - 1 ? `1px solid ${T.border}` : "none", cursor: "pointer" }}>
+                              <div key={i} onClick={() => setHistDetail({ delivery: d, date: log.date, delIdx: dels.length - 1 - i })} style={{ display: "flex", alignItems: "center", gap: 0, padding: "7px 0", borderBottom: i < dels.length - 1 ? `1px solid ${T.border}` : "none", cursor: "pointer" }}>
                                 <div style={{ width: 28, height: 28, borderRadius: 7, background: d.cancelled ? T.textFaint : (c?.bg || "#333"), color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: sz(14), fontWeight: 700, flexShrink: 0, marginRight: 8 }}>{c?.letter || "?"}</div>
                                 <div style={{ flex: 1, minWidth: 0, marginRight: 6 }}>
                                   {d.cancelled ? <div style={{ fontSize: sz(12), color: "#EF4444", fontWeight: 600 }}>キャンセル</div> : (
@@ -3452,9 +3529,9 @@ export default function App() {
                   const revColor = (r) => {
                     if (!r) return "transparent";
                     if (r >= 8000) return "#EF4444CC";
-                    if (r >= 5000) return "#F97316BB";
-                    if (r >= 3000) return "#3B82F6AA";
-                    return "#93C5FD77";
+                    if (r >= 5000) return "#F59E0BBB";
+                    if (r >= 3000) return "#60A5FAAA";
+                    return "#3B82F677";
                   };
                   const DOW_H = ["日","月","火","水","木","金","土"];
                   const cells = [];
@@ -3492,9 +3569,9 @@ export default function App() {
                         <span style={{ fontSize: sz(9), color: T.textMuted }}>{workDays}日稼働 / {daysInMonth}日</span>
                         <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
                           {[
-                            { color: "#93C5FD77", label: "~3k" },
-                            { color: "#3B82F6AA", label: "~5k" },
-                            { color: "#F97316BB", label: "~8k" },
+                            { color: "#3B82F677", label: "~3k" },
+                            { color: "#60A5FAAA", label: "~5k" },
+                            { color: "#F59E0BBB", label: "~8k" },
                             { color: "#EF4444CC", label: "8k+" },
                           ].map((c, i) => (
                             <div key={i} style={{ display: "flex", alignItems: "center", gap: 1 }}>

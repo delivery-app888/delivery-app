@@ -12,6 +12,7 @@ const sk = () => "app-settings";
 
 // ─── Storage operations ───
 export const sv = async (d) => { try { const k = tk(); await storage.set(k, JSON.stringify(d)); try { const r = await storage.get(ik()); const ks = r ? JSON.parse(r.value) : []; if (!ks.includes(k)) { ks.push(k); await storage.set(ik(), JSON.stringify(ks)); } } catch { await storage.set(ik(), JSON.stringify([k])); } } catch {} };
+export const svByDate = async (date, d) => { try { const k = `log:${date}`; await storage.set(k, JSON.stringify(d)); } catch {} };
 export const lt = async () => { try { const r = await storage.get(tk()); return r ? JSON.parse(r.value) : null; } catch { return null; } };
 export const la = async () => { try { const r = await storage.get(ik()); const ks = r ? JSON.parse(r.value) : []; const o = []; for (const k of ks) { try { const d = await storage.get(k); if (d) o.push(JSON.parse(d.value)); } catch {} } return o; } catch { return []; } };
 export const lg = async () => { try { const r = await storage.get(gk()); return r ? JSON.parse(r.value) : null; } catch { return null; } };
@@ -63,7 +64,7 @@ export const dc = (d) => (OT.find(o => o.id === d.orderType)?.c || 1);
 
 // ─── Data helpers ───
 export const newDay = () => ({ date: tds(), weather: null, sessions: [], breaks: [], deliveries: [], dailyIncentives: [], jizoSessions: [], currentSessionStart: null, currentBreakStart: null, currentOrderTime: null, currentJizoStart: null });
-export const defaultSettings = () => ({ theme: "dark", incInGoal: true, incInReward: false, largeFont: false, workDays: [1, 2, 3, 4, 5] });
+export const defaultSettings = () => ({ theme: "dark", incInGoal: true, incInReward: false, largeFont: false, workDays: [1, 2, 3, 4, 5], pickgoFeeRate: 15 });
 
 export const migrate = (d) => {
   if (!d.dailyIncentives) d.dailyIncentives = [];
