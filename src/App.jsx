@@ -164,11 +164,21 @@ export default function App() {
 
   useEffect(() => { if (screen.startsWith("ana_")) return; const t = setInterval(() => setNow(Date.now()), 10000); return () => clearInterval(t); }, [screen]);
   useEffect(() => { (async () => {
-    const saved = await lt(); if (saved) setData(migrate(saved));
+    let activeDate = tds();
+    const saved = await lt();
+    if (saved) {
+      setData(migrate(saved));
+      activeDate = saved.date || tds();
+    } else {
+      // Check if there's an active session from a previous day (day-crossing)
+      const all0 = await la();
+      const activeLog = all0.find(l => l.date && l.date !== tds() && l.currentSessionStart);
+      if (activeLog) { setData(migrate(activeLog)); activeDate = activeLog.date; }
+    }
     const g = await lg(); if (g?.amount) { const curMonth = ms(); if (!g.month || g.month === curMonth) setGoal(g.amount); }
     const s = await ls(); if (s) setSettings({ ...defaultSettings(), ...s });
     let all = await la();
-    setAllLogs(all.filter(l => l.date !== tds()));
+    setAllLogs(all.filter(l => l.date !== activeDate));
     // Show tutorial on first launch
     try { const tutDone = await storage.get("tutorial-done"); if (!tutDone) setTutorial(true); } catch { setTutorial(true); }
     setLoading(false);
@@ -622,31 +632,54 @@ export default function App() {
   // ─── 1. Golden Time indicator (historical hourly earnings) ───
   const goldenTime = (() => {
     if (!isOn) return null;
-    const curH = new Date().getHours();
-    const hourMap = {};
+    const now = new Date();
+    const curH = now.getHours();
+    const curDow = now.getDay();
+    // Collect per-hour revenue grouped by date, with day-of-week
+    const hourByDate = {}; // { "YYYY-MM-DD": { hour: rev } }
+    const dateDows = {};   // { "YYYY-MM-DD": dayOfWeek }
     allLogs.forEach(l => {
-      const wk = (l.sessions || []).reduce((s, x) => s + ((x.end || 0) - x.start), 0) - (l.breaks || []).reduce((s, b) => s + ((b.end || 0) - (b.start || 0)), 0);
-      if (wk <= 0) return;
-      const dels = (l.deliveries || []).filter(d => !d.cancelled);
+      if (!l.date) return;
+      const dels = (l.deliveries || []).filter(d => !d.cancelled && d.orderTime);
+      if (dels.length === 0) return;
+      const dow = new Date(l.date + "T00:00:00").getDay();
+      dateDows[l.date] = dow;
+      if (!hourByDate[l.date]) hourByDate[l.date] = {};
       dels.forEach(d => {
         const h = new Date(d.orderTime).getHours();
-        if (!hourMap[h]) hourMap[h] = { rev: 0, ms: 0 };
-        hourMap[h].rev += (d.reward || 0);
-        hourMap[h].ms += (d.completeTime && d.orderTime ? d.completeTime - d.orderTime : 0);
+        hourByDate[l.date][h] = (hourByDate[l.date][h] || 0) + (d.reward || 0);
       });
     });
-    const cur = hourMap[curH];
-    if (!cur || cur.ms <= 0) return null;
-    const curHr = Math.round(cur.rev / (cur.ms / 3600000));
-    // Calculate average hourly rate across all hours
-    let totalRev = 0, totalMs = 0;
-    Object.values(hourMap).forEach(v => { totalRev += v.rev; totalMs += v.ms; });
-    const avgHr = totalMs > 0 ? Math.round(totalRev / (totalMs / 3600000)) : 0;
+    // Calculate hourly rate: revenue sum / day count (prefer same weekday)
+    const calcHourRate = (hour, dowFilter) => {
+      let rev = 0, days = 0;
+      Object.entries(hourByDate).forEach(([date, hours]) => {
+        if (dowFilter !== null && dateDows[date] !== dowFilter) return;
+        if (hours[hour] !== undefined) { rev += hours[hour]; days++; }
+      });
+      return days > 0 ? { rate: Math.round(rev / days), days } : null;
+    };
+    // Try same weekday first, fallback to all days
+    let curData = calcHourRate(curH, curDow);
+    let useDow = true;
+    if (!curData || curData.days < 3) { curData = calcHourRate(curH, null); useDow = false; }
+    if (!curData || curData.days < 3) return null;
+    const curHr = curData.rate;
+    // Average across all hours (same filter)
+    const allHours = new Set();
+    Object.values(hourByDate).forEach(hours => Object.keys(hours).forEach(h => allHours.add(Number(h))));
+    let totalRev = 0, totalCount = 0;
+    allHours.forEach(h => {
+      const d = calcHourRate(h, useDow ? curDow : null);
+      if (d) { totalRev += d.rate; totalCount++; }
+    });
+    const avgHr = totalCount > 0 ? Math.round(totalRev / totalCount) : 0;
     if (avgHr <= 0) return null;
     const ratio = curHr / avgHr;
-    if (ratio >= 1.15) return { type: "golden", hr: curHr, label: "ゴールデンタイム" };
-    if (ratio <= 0.85) return { type: "slow", hr: curHr, label: "まったりタイム" };
-    return { type: "normal", hr: curHr, label: "平均ペース" };
+    const dowLabel = useDow ? ["日","月","火","水","木","金","土"][curDow] + "曜" : "";
+    if (ratio >= 1.15) return { type: "golden", hr: curHr, label: dowLabel ? `${dowLabel}のゴールデンタイム` : "ゴールデンタイム" };
+    if (ratio <= 0.85) return { type: "slow", hr: curHr, label: dowLabel ? `${dowLabel}のまったりタイム` : "まったりタイム" };
+    return { type: "normal", hr: curHr, label: dowLabel ? `${dowLabel}の平均ペース` : "平均ペース" };
   })();
 
   // ─── 2. "あと少し" nudge (80%+ of daily goal) ───
@@ -667,12 +700,27 @@ export default function App() {
   const pacePredict = (() => {
     if (!isOn || wkMs < 1800000) return null; // need at least 30min of work
     const hrWorked = wkMs / 3600000;
-    // Estimate remaining work hours (assume typical 8-10hr day, or use sessions)
-    const startH = data.sessions[0]?.start || data.currentSessionStart;
-    if (!startH) return null;
-    const typicalEndH = 10; // assume ~10 hours typical workday
-    const elapsedH = (Date.now() - startH) / 3600000;
-    const remainH = Math.max(0, typicalEndH - elapsedH);
+    // Predict end time from past session data
+    const today = new Date();
+    const todayDow = today.getDay();
+    const pastEndTimes = [];
+    allLogs.forEach(l => {
+      if (!l.sessions || l.sessions.length === 0) return;
+      const lastSes = l.sessions[l.sessions.length - 1];
+      if (!lastSes.end) return;
+      const endDate = new Date(lastSes.end);
+      const endMinutes = endDate.getHours() * 60 + endDate.getMinutes();
+      const dow = endDate.getDay();
+      const daysAgo = Math.max(1, Math.round((today - endDate) / 86400000));
+      const weight = (dow === todayDow ? 2 : 1) / daysAgo;
+      pastEndTimes.push({ minutes: endMinutes, weight });
+    });
+    if (pastEndTimes.length < 3) return null; // not enough data to predict
+    const totalWeight = pastEndTimes.reduce((s, e) => s + e.weight, 0);
+    const avgEndMinutes = Math.round(pastEndTimes.reduce((s, e) => s + e.minutes * e.weight, 0) / totalWeight);
+    const nowMinutes = today.getHours() * 60 + today.getMinutes();
+    const remainMin = Math.max(0, avgEndMinutes - nowMinutes);
+    const remainH = remainMin / 60;
     const pace = totRew / hrWorked;
     const predicted = Math.round(totRew + pace * remainH);
     const pctOfGoal = dailyTarget > 0 ? Math.round(predicted / dailyTarget * 100) : 0;
@@ -845,8 +893,10 @@ export default function App() {
   };
   const doOrd = () => { if (!isOn || isBrk || hasOrd) return; if (isJz) update(d => { d.jizoSessions.push({ start: d.currentJizoStart, end: Date.now() }); d.currentJizoStart = null; }); update(d => { d.currentOrderTime = Date.now(); }); getPos().then(p => { if (p) { update(d => { d.currentOrderPos = p; }); fetchWeather(p.lat, p.lng).then(w => { if (w) update(d => { d.currentOrderWeather = w; }); }); } }); pulse("order"); };
   const doCmp = () => { if (!hasOrd) return; setRwCo(null); setRwAmt(""); setRwInc(""); setRwField("reward"); setRwType("single"); setRwRating(null); setScreen("reward"); pulse("complete"); };
+  const [rwSaving, setRwSaving] = useState(false);
   const doRwOk = async () => {
-    if (!rwCo || !rwAmt) return;
+    if (!rwCo || !rwAmt || rwSaving) return;
+    setRwSaving(true);
     const rawRew = parseInt(rwAmt, 10) || 0;
     const inc = parseInt(rwInc, 10) || 0;
     // PickGo fee deduction
@@ -883,6 +933,7 @@ export default function App() {
       });
     }
     setScreen("main");
+    setRwSaving(false);
 
     // ─── Delivery feedback toast ───
     const newDelCnt = delCnt + (rwType === "double" ? 2 : rwType === "triple" ? 3 : 1);
@@ -1171,7 +1222,7 @@ export default function App() {
       })()}
 
       <div style={{ width: "100%", maxWidth: 320, padding: "0 10px" }}>
-        <button style={{ ...okBt(!rwCo || !rwAmt), maxWidth: "100%", height: 52, fontSize: sz(17) }} onClick={doRwOk} disabled={!rwCo || !rwAmt}>OK</button>
+        <button style={{ ...okBt(!rwCo || !rwAmt || rwSaving), maxWidth: "100%", height: 52, fontSize: sz(17) }} onClick={doRwOk} disabled={!rwCo || !rwAmt || rwSaving}>{rwSaving ? "保存中..." : "OK"}</button>
         <button onClick={doCkCan} style={{ width: "100%", height: 44, borderRadius: 10, border: "1.5px solid #EF444444", background: T.card, color: "#EF4444", fontSize: sz(14), fontWeight: 600, cursor: "pointer", fontFamily: FN, marginTop: 6 }}>調理待ちキャンセル</button>
         <button onClick={() => setScreen("main")} style={{ width: "100%", height: 40, borderRadius: 10, border: `1.5px solid ${T.borderLight}`, background: "none", color: T.textMuted, fontSize: sz(14), fontWeight: 600, cursor: "pointer", fontFamily: FN, marginTop: 4 }}>戻る</button>
       </div>
