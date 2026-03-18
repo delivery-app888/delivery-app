@@ -162,23 +162,75 @@ export default function App() {
   // Font scale: large mode bumps small text to minimum 13px
   const sz = (n) => settings.largeFont ? (n < 12 ? 13 : n < 18 ? n + 3 : n < 24 ? n + 2 : n + 1) : n;
 
-  useEffect(() => { if (screen.startsWith("ana_")) return; const t = setInterval(() => setNow(Date.now()), 10000); return () => clearInterval(t); }, [screen]);
+  const lastDateRef = useRef(tds());
+  useEffect(() => {
+    if (screen.startsWith("ana_")) return;
+    const t = setInterval(() => {
+      setNow(Date.now());
+      // Day-crossing detection: auto-split sessions/breaks/jizo at midnight
+      const today = tds();
+      if (lastDateRef.current !== today) {
+        lastDateRef.current = today;
+        setData(prev => {
+          const midnight = new Date(today + "T00:00:00").getTime();
+          const updated = { ...prev, sessions: [...prev.sessions], breaks: [...prev.breaks], jizoSessions: [...prev.jizoSessions], deliveries: [...prev.deliveries], dailyIncentives: [...prev.dailyIncentives] };
+          // Close active session at 23:59:59.999 and save previous day
+          if (updated.currentSessionStart) {
+            updated.sessions.push({ start: updated.currentSessionStart, end: midnight - 1 });
+            updated.currentSessionStart = null;
+          }
+          if (updated.currentBreakStart) {
+            updated.breaks.push({ start: updated.currentBreakStart, end: midnight - 1 });
+            updated.currentBreakStart = null;
+          }
+          if (updated.currentJizoStart) {
+            updated.jizoSessions.push({ start: updated.currentJizoStart, end: midnight - 1 });
+            updated.currentJizoStart = null;
+          }
+          // Save previous day's data
+          svByDate(updated.date, updated);
+          // Add previous day to allLogs
+          setAllLogs(prevLogs => [updated, ...prevLogs.filter(l => l.date !== updated.date)]);
+          // Create new day with active session/break/jizo continuing from midnight
+          const newDayData = newDay();
+          newDayData.currentSessionStart = prev.currentSessionStart ? midnight : null;
+          newDayData.currentBreakStart = prev.currentBreakStart ? midnight : null;
+          newDayData.currentJizoStart = prev.currentJizoStart ? midnight : null;
+          // Carry over currentOrderTime if mid-delivery (will be saved to previous day on completion)
+          newDayData.currentOrderTime = prev.currentOrderTime || null;
+          newDayData.currentOrderPos = prev.currentOrderPos || null;
+          newDayData.currentOrderWeather = prev.currentOrderWeather || null;
+          return newDayData;
+        });
+      }
+    }, 10000);
+    return () => clearInterval(t);
+  }, [screen]);
   useEffect(() => { (async () => {
-    let activeDate = tds();
-    const saved = await lt();
-    if (saved) {
-      setData(migrate(saved));
-      activeDate = saved.date || tds();
-    } else {
-      // Check if there's an active session from a previous day (day-crossing)
-      const all0 = await la();
-      const activeLog = all0.find(l => l.date && l.date !== tds() && l.currentSessionStart);
-      if (activeLog) { setData(migrate(activeLog)); activeDate = activeLog.date; }
+    const today = tds();
+    const saved = await lt(); if (saved) setData(migrate(saved));
+    // Check for active session from a previous day and split it
+    let all = await la();
+    const activeLog = all.find(l => l.date && l.date !== today && l.currentSessionStart);
+    if (activeLog) {
+      const midnight = new Date(today + "T00:00:00").getTime();
+      // Close previous day's active states at midnight
+      if (activeLog.currentSessionStart) { activeLog.sessions.push({ start: activeLog.currentSessionStart, end: midnight - 1 }); activeLog.currentSessionStart = null; }
+      if (activeLog.currentBreakStart) { activeLog.breaks.push({ start: activeLog.currentBreakStart, end: midnight - 1 }); activeLog.currentBreakStart = null; }
+      if (activeLog.currentJizoStart) { activeLog.jizoSessions.push({ start: activeLog.currentJizoStart, end: midnight - 1 }); activeLog.currentJizoStart = null; }
+      await svByDate(activeLog.date, activeLog);
+      // Start today with session continuing from midnight
+      const todaySaved = saved || newDay();
+      if (!todaySaved.currentSessionStart) todaySaved.currentSessionStart = midnight;
+      if (activeLog.currentBreakStart !== null) todaySaved.currentBreakStart = midnight;
+      // Carry over mid-delivery state
+      if (activeLog.currentOrderTime) { todaySaved.currentOrderTime = activeLog.currentOrderTime; todaySaved.currentOrderPos = activeLog.currentOrderPos; todaySaved.currentOrderWeather = activeLog.currentOrderWeather; }
+      setData(migrate(todaySaved));
     }
     const g = await lg(); if (g?.amount) { const curMonth = ms(); if (!g.month || g.month === curMonth) setGoal(g.amount); }
     const s = await ls(); if (s) setSettings({ ...defaultSettings(), ...s });
-    let all = await la();
-    setAllLogs(all.filter(l => l.date !== activeDate));
+    all = await la();
+    setAllLogs(all.filter(l => l.date !== today));
     // Show tutorial on first launch
     try { const tutDone = await storage.get("tutorial-done"); if (!tutDone) setTutorial(true); } catch { setTutorial(true); }
     setLoading(false);
@@ -910,22 +962,34 @@ export default function App() {
     else if (rew <= avgUnit * 0.8) autoRating = "bad";
     const finalRating = rwRating || autoRating; // manual override or auto
     const endPos = await getPos();
-    update(d => {
-      const sp = d.currentOrderPos || null;
-      const aw = d.currentOrderWeather || null;
-      d.deliveries.push({
-        orderTime: d.currentOrderTime, completeTime: Date.now(), company: rwCo,
-        reward: rew, rawReward: isPickgo ? rawRew : undefined, incentive: inc, orderType: rwType, cancelled: false,
-        rating: finalRating,
-        startLat: sp?.lat || null, startLng: sp?.lng || null,
-        endLat: endPos?.lat || null, endLng: endPos?.lng || null,
-        apiWeather: aw,
-        areaName: null,
+    const orderDate = data.currentOrderTime ? toLD(data.currentOrderTime) : tds();
+    const isCrossDay = orderDate !== data.date;
+    const deliveryObj = {
+      orderTime: data.currentOrderTime, completeTime: Date.now(), company: rwCo,
+      reward: rew, rawReward: isPickgo ? rawRew : undefined, incentive: inc, orderType: rwType, cancelled: false,
+      rating: finalRating,
+      startLat: data.currentOrderPos?.lat || null, startLng: data.currentOrderPos?.lng || null,
+      endLat: endPos?.lat || null, endLng: endPos?.lng || null,
+      apiWeather: data.currentOrderWeather || null,
+      areaName: null,
+    };
+    if (isCrossDay) {
+      // Save delivery to the previous day's log (order date)
+      const prevLog = allLogs.find(l => l.date === orderDate);
+      if (prevLog) {
+        prevLog.deliveries.push(deliveryObj);
+        svByDate(orderDate, prevLog);
+        setAllLogs(prev => prev.map(l => l.date === orderDate ? { ...prevLog } : l));
+      }
+      update(d => { d.currentOrderTime = null; d.currentOrderPos = null; d.currentOrderWeather = null; });
+    } else {
+      update(d => {
+        d.deliveries.push(deliveryObj);
+        d.currentOrderTime = null;
+        d.currentOrderPos = null;
+        d.currentOrderWeather = null;
       });
-      d.currentOrderTime = null;
-      d.currentOrderPos = null;
-      d.currentOrderWeather = null;
-    });
+    }
     // Background geocode for area name
     if (endPos?.lat && endPos?.lng) {
       reverseGeocode(endPos.lat, endPos.lng).then(name => {
@@ -1530,16 +1594,26 @@ export default function App() {
           {/* Hourly bar chart */}
           <div style={aC}>
             <div style={aT2}>時間帯別 配達件数</div>
-            <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
-              <div style={{ width: 700, height: 160 }}>
+            <div style={{ display: "flex" }}>
+              <div style={{ width: 36, flexShrink: 0, height: 160 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={drHourly} margin={{ top: 4, right: 4, bottom: 0, left: -20 }}>
-                    <XAxis dataKey="name" tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} interval={0} />
+                  <BarChart data={drHourly} margin={{ top: 4, right: 0, bottom: 0, left: -10 }}>
+                    <XAxis dataKey="name" tick={false} axisLine={false} tickLine={false} />
                     <YAxis tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} allowDecimals={false} />
-                    <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
-                    <Bar isAnimationActive={false} dataKey="件数" fill={T.accent} radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
+              </div>
+              <div style={{ flex: 1, overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                <div style={{ width: 660, height: 160 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={drHourly} margin={{ top: 4, right: 4, bottom: 0, left: -20 }}>
+                      <XAxis dataKey="name" tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} interval={0} />
+                      <YAxis hide />
+                      <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
+                      <Bar isAnimationActive={false} dataKey="件数" fill={T.accent} radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
               </div>
             </div>
           </div>
@@ -1586,7 +1660,7 @@ export default function App() {
               return [
                 { l: "稼働時間", v: fd(drSesMs), c: T.text, desc: null },
                 { l: "実配達時間", v: fd(actualDelMs), c: "#22C55E", desc: null },
-                { l: "無職時間", v: fd(wasteMs), c: "#EF4444", desc: `うち地蔵 ${fd(drJzMs)}` },
+                { l: "待機時間", v: fd(wasteMs), c: "#EF4444", desc: `うち地蔵 ${fd(drJzMs)}` },
                 { l: "休憩時間", v: fd(drBrkMs), c: T.textMuted, desc: null },
               ].map((r, i) => (
                 <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 0", borderBottom: i < 3 ? `1px solid ${T.border}` : "none" }}>
@@ -1701,31 +1775,51 @@ export default function App() {
           <div style={{ fontSize: sz(10), color: T.textDim, marginBottom: 8, textAlign: "right" }}>{hrFiltered.length}件のデータ</div>
           <div style={aC}>
             <div style={aT2}>時間帯別 売上</div>
-            <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
-              <div style={{ width: 700, height: 200 }}>
+            <div style={{ display: "flex" }}>
+              <div style={{ width: 40, flexShrink: 0, height: 200 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={hData} margin={{ top: 4, right: 4, bottom: 0, left: -10 }}>
-                    <XAxis dataKey="name" tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} interval={0} />
+                  <BarChart data={hData} margin={{ top: 4, right: 0, bottom: 0, left: -10 }}>
+                    <XAxis dataKey="name" tick={false} axisLine={false} tickLine={false} />
                     <YAxis tick={{ fontSize: sz(9), fill: T.textDim }} axisLine={false} tickLine={false} />
-                    <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
-                    <Bar isAnimationActive={false} dataKey="売上" fill={T.accent} radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
+              </div>
+              <div style={{ flex: 1, overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                <div style={{ width: 660, height: 200 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={hData} margin={{ top: 4, right: 4, bottom: 0, left: -20 }}>
+                      <XAxis dataKey="name" tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} interval={0} />
+                      <YAxis hide />
+                      <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
+                      <Bar isAnimationActive={false} dataKey="売上" fill={T.accent} radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
               </div>
             </div>
           </div>
           <div style={aC}>
             <div style={aT2}>時間帯別 平均単価</div>
-            <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
-              <div style={{ width: 700, height: 200 }}>
+            <div style={{ display: "flex" }}>
+              <div style={{ width: 40, flexShrink: 0, height: 200 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={hData} margin={{ top: 4, right: 4, bottom: 0, left: -10 }}>
-                    <XAxis dataKey="name" tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} interval={0} />
+                  <BarChart data={hData} margin={{ top: 4, right: 0, bottom: 0, left: -10 }}>
+                    <XAxis dataKey="name" tick={false} axisLine={false} tickLine={false} />
                     <YAxis tick={{ fontSize: sz(9), fill: T.textDim }} axisLine={false} tickLine={false} />
-                    <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
-                    <Bar isAnimationActive={false} dataKey="単価" fill="#22C55E" radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
+              </div>
+              <div style={{ flex: 1, overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+                <div style={{ width: 660, height: 200 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={hData} margin={{ top: 4, right: 4, bottom: 0, left: -20 }}>
+                      <XAxis dataKey="name" tick={{ fontSize: sz(10), fill: T.textDim }} axisLine={false} tickLine={false} interval={0} />
+                      <YAxis hide />
+                      <Tooltip content={(p) => <ChartTip {...p} theme={T} />} cursor={{ fill: `${T.accent}11` }} />
+                      <Bar isAnimationActive={false} dataKey="単価" fill="#22C55E" radius={[4, 4, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
               </div>
             </div>
           </div>
@@ -2436,15 +2530,21 @@ export default function App() {
       ...todayDels2,
     ];
     const totalCount = allDels2.length;
-    const hasEnoughData = totalCount >= 50;
+    const workDaysCount = new Set([...allLogs.map(l => l.date), ...(data.deliveries.length > 0 ? [data.date] : [])].filter(Boolean)).size;
+    // Tiered analysis levels
+    const anaLevel = (totalCount >= 200 && workDaysCount >= 21) ? 3 : (totalCount >= 100 && workDaysCount >= 14) ? 2 : (totalCount >= 30 && workDaysCount >= 7) ? 1 : 0;
+    const hasEnoughData = anaLevel >= 1;
     const avgPerMin = allDels2.length > 0 ? allDels2.reduce((s, d) => s + d.perMin, 0) / allDels2.length : 0;
+    // Monthly work hours for impact calculation
+    const monthlyWorkMs = (() => { let total = 0, days = 0; allLogs.forEach(l => { const ses = (l.sessions || []).reduce((s, x) => s + ((x.end || 0) - x.start), 0); const brk = (l.breaks || []).reduce((s, b) => s + ((b.end || 0) - (b.start || 0)), 0); if (ses > 0) { total += ses - brk; days++; } }); return days > 0 ? total / days * 30 : 0; })();
+    const monthlyWorkH = monthlyWorkMs / 3600000;
 
     // ─── Rule detection function ───
     // useDayType: true=平日/土日祝で分ける(PRO), false=分けない(無料)
     const detectRules = (dels, useDayType = true) => {
       const rules = [];
       const avg = dels.length > 0 ? dels.reduce((s, d) => s + d.perMin, 0) / dels.length : 0;
-      if (avg <= 0 || dels.length < 5) return rules;
+      if (avg <= 0 || dels.length < 15) return rules;
 
       // Rule 1: Company × Time (optionally within same dayType)
       const coTimeMap = {};
@@ -2455,7 +2555,7 @@ export default function App() {
         coTimeMap[key].perMins.push(d.perMin);
       });
       Object.values(coTimeMap).forEach(g => {
-        if (g.perMins.length < 5) return;
+        if (g.perMins.length < 15) return;
         const gAvg = g.perMins.reduce((s, v) => s + v, 0) / g.perMins.length;
         const diff = (gAvg - avg) / avg;
         if (diff < -0.15) {
@@ -2488,7 +2588,7 @@ export default function App() {
           singleWeight += g.multi.length;
         }
       });
-      if (multiTotal >= 5 && singleWeight > 0) {
+      if (multiTotal >= 15 && singleWeight > 0) {
         const mAvg = multiSum / multiTotal;
         const sAvg = singleAvgWeighted / singleWeight;
         const diff = (mAvg - sAvg) / sAvg;
@@ -2513,7 +2613,7 @@ export default function App() {
         sorted.slice(0, mid).forEach(d => firstHalfPMs.push(d.perMin));
         sorted.slice(mid).forEach(d => secondHalfPMs.push(d.perMin));
       });
-      if (firstHalfPMs.length >= 10 && secondHalfPMs.length >= 10) {
+      if (firstHalfPMs.length >= 15 && secondHalfPMs.length >= 15) {
         const fAvg = firstHalfPMs.reduce((s, v) => s + v, 0) / firstHalfPMs.length;
         const sAvg2 = secondHalfPMs.reduce((s, v) => s + v, 0) / secondHalfPMs.length;
         const diff = (sAvg2 - fAvg) / fAvg;
@@ -2527,7 +2627,7 @@ export default function App() {
       for (const thresh of rewardThresholds) {
         const lowDels = dels.filter(d => (d.reward || 0) <= thresh);
         const highDels = dels.filter(d => (d.reward || 0) > thresh);
-        if (lowDels.length >= 5 && highDels.length >= 5) {
+        if (lowDels.length >= 15 && highDels.length >= 15) {
           const lowAvg = lowDels.reduce((s, d) => s + d.perMin, 0) / lowDels.length;
           const highAvg = highDels.reduce((s, d) => s + d.perMin, 0) / highDels.length;
           const diff = (lowAvg - highAvg) / highAvg;
@@ -2548,7 +2648,7 @@ export default function App() {
         areaMap[d.areaName].push(d.perMin);
       });
       Object.entries(areaMap).forEach(([area, pms]) => {
-        if (pms.length < 5) return;
+        if (pms.length < 15) return;
         const aAvg = pms.reduce((s, v) => s + v, 0) / pms.length;
         const diff = (aAvg - avg) / avg;
         if (diff < -0.15) {
@@ -2558,7 +2658,7 @@ export default function App() {
         }
       });
 
-      return rules.sort((a, b) => b.monthImpact - a.monthImpact);
+      return rules.filter(r => r.monthImpact > 0).sort((a, b) => b.monthImpact - a.monthImpact);
     };
 
     const recentRules = detectRules(recentDels, false); // 無料: 直近3日、平日/土日祝区別なし
@@ -2608,13 +2708,41 @@ export default function App() {
 
     return (
       <AnaPage title="🎯 効率化ポイント">
+        {/* Data collection progress */}
+        {anaLevel < 3 && (
+          <div style={aC}>
+            <div style={{ fontSize: sz(13), fontWeight: 700, color: T.text, marginBottom: 8 }}>📊 分析データの蓄積状況</div>
+            {[
+              { level: 1, label: "基本分析", need: "30件 & 7日稼働", delTarget: 30, dayTarget: 7 },
+              { level: 2, label: "標準分析", need: "100件 & 14日稼働", delTarget: 100, dayTarget: 14 },
+              { level: 3, label: "詳細分析", need: "200件 & 21日稼働", delTarget: 200, dayTarget: 21 },
+            ].map(tier => {
+              const delPct = Math.min(100, Math.round(totalCount / tier.delTarget * 100));
+              const dayPct = Math.min(100, Math.round(workDaysCount / tier.dayTarget * 100));
+              const pct = Math.min(delPct, dayPct);
+              const unlocked = anaLevel >= tier.level;
+              return (
+                <div key={tier.level} style={{ marginBottom: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                    <span style={{ fontSize: sz(11), fontWeight: 600, color: unlocked ? "#22C55E" : T.textSub }}>{unlocked ? "✓ " : ""}{tier.label}</span>
+                    <span style={{ fontSize: sz(10), color: T.textDim }}>{totalCount}件 / {workDaysCount}日</span>
+                  </div>
+                  <div style={{ height: 6, borderRadius: 3, background: T.barBg, overflow: "hidden" }}>
+                    <div style={{ height: "100%", borderRadius: 3, background: unlocked ? "#22C55E" : T.accent, width: `${pct}%`, transition: "width 0.3s" }} />
+                  </div>
+                  {!unlocked && <div style={{ fontSize: sz(9), color: T.textDim, marginTop: 2 }}>必要: {tier.need}</div>}
+                </div>
+              );
+            })}
+          </div>
+        )}
         {/* Free: Recent 3 days summary */}
         <div style={aC}>
           <div style={aT2}>直近3日の効率分析</div>
           {recentDels.length === 0 ? (
             <div style={{ fontSize: sz(12), color: T.textDim, textAlign: "center", padding: "12px 0" }}>配達データがありません</div>
-          ) : recentDels.length < 5 ? (
-            <div style={{ fontSize: sz(12), color: T.textDim, textAlign: "center", padding: "12px 0" }}>あと{5 - recentDels.length}件で分析を開始します</div>
+          ) : recentDels.length < 15 ? (
+            <div style={{ fontSize: sz(12), color: T.textDim, textAlign: "center", padding: "12px 0" }}>あと{15 - recentDels.length}件で分析を開始します</div>
           ) : (
             <>
               <div style={{ display: "flex", justifyContent: "space-around", marginBottom: 8 }}>
@@ -2677,24 +2805,64 @@ export default function App() {
             )}
             <div style={{ fontSize: sz(10), color: T.textFaint, textAlign: "center", marginTop: 8 }}>平日/土日祝 × 時間帯で補正して比較（{totalCount}件）</div>
           </>) : (<>
-            <PremiumBlur>
-              <div style={{ ...aC, background: T === LIGHT ? "#FFFBEB" : "#1A1810" }}>
-                <div style={{ fontSize: sz(14), fontWeight: 700, color: "#F59E0B", marginBottom: 8 }}>📋 あなたの効率化ルール</div>
-                <div style={{ padding: "20px 0" }} />
+            {/* Free: Concrete advice from detected rules */}
+            {allRules.length > 0 && (
+              <div style={aC}>
+                <div style={{ fontSize: sz(13), fontWeight: 700, color: T.text, marginBottom: 8 }}>💡 改善アドバイス</div>
+                {allRules.slice(0, 2).map((r, i) => {
+                  const advice = r.type === "company_time" ? `${r.label}は効率が低めです。この条件を避けてみましょう。`
+                    : r.type === "multi_trap" ? "ダブル・トリプル案件がシングルより効率が悪い傾向があります。シングルを優先してみましょう。"
+                    : r.type === "overtime" ? "稼働後半に効率が下がっています。早めに休憩を取ると改善するかもしれません。"
+                    : r.type === "low_reward" ? `${r.label}は効率を下げています。高報酬の案件を待つことも検討しましょう。`
+                    : r.type === "area" ? `${r.label}は効率が低めです。別のエリアへの移動を検討しましょう。`
+                    : "改善の余地があります。";
+                  return (
+                    <div key={i} style={{ padding: "8px 0", borderTop: i > 0 ? `1px solid ${T.border}` : "none" }}>
+                      <div style={{ fontSize: sz(12), color: T.text, lineHeight: 1.6 }}>{r.icon} {advice}</div>
+                    </div>
+                  );
+                })}
               </div>
-              <div style={aC}><div style={{ padding: "40px 0" }} /></div>
-              <div style={aC}><div style={{ padding: "40px 0" }} /></div>
-            </PremiumBlur>
+            )}
+            {/* Hook: Show rule count + total impact, blur the details */}
+            {allRules.length > 0 && (
+              <div style={{ position: "relative", marginBottom: 8 }}>
+                <PremiumBlur>
+                  <div style={{ ...aC, background: T === LIGHT ? "#FFFBEB" : "#1A1810" }}>
+                    <div style={{ fontSize: sz(14), fontWeight: 700, color: "#F59E0B", marginBottom: 8 }}>📋 あなたの効率化ルール</div>
+                    {allRules.slice(0, 3).map((_, i) => (
+                      <div key={i} style={{ padding: "10px 0", borderTop: i > 0 ? `1px solid ${T === LIGHT ? "#FDE68A44" : "#42381A"}` : "none" }}>
+                        <div style={{ height: 14, background: T.barBg, borderRadius: 4, width: "70%" }} />
+                      </div>
+                    ))}
+                  </div>
+                </PremiumBlur>
+                <div style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", zIndex: 10 }}>
+                  <div style={{ background: T.card, borderRadius: 12, padding: "12px 20px", border: `1px solid ${T.purple}44`, textAlign: "center", boxShadow: "0 4px 16px #0004" }}>
+                    <div style={{ fontSize: sz(13), fontWeight: 700, color: T.text, marginBottom: 4 }}>{allRules.length}つの改善ポイントを検出</div>
+                    <div style={{ fontSize: sz(16), fontWeight: 800, color: "#22C55E", marginBottom: 6 }}>全適用で月+¥{totalMonthImpact.toLocaleString()}</div>
+                    <div style={{ fontSize: sz(11), color: T.purple, fontWeight: 600 }}>PROで詳細を確認 →</div>
+                  </div>
+                </div>
+              </div>
+            )}
+            {allRules.length === 0 && (
+              <PremiumBlur>
+                <div style={{ ...aC, background: T === LIGHT ? "#FFFBEB" : "#1A1810" }}>
+                  <div style={{ fontSize: sz(14), fontWeight: 700, color: "#F59E0B", marginBottom: 8 }}>📋 あなたの効率化ルール</div>
+                  <div style={{ padding: "20px 0" }} />
+                </div>
+              </PremiumBlur>
+            )}
             <div style={{ textAlign: "center", marginTop: 4 }}>
               <div style={{ fontSize: sz(11), color: T.purple, fontWeight: 600 }}>平日/土日祝を分けた高精度分析 → PRO</div>
             </div>
           </>)
         ) : (
           <div style={{ ...aC, textAlign: "center" }}>
-            <div style={{ fontSize: sz(13), color: T.textDim, marginBottom: 4 }}>📊 全期間分析のデータ収集中...</div>
-            <div style={{ fontSize: sz(12), color: T.textMuted }}>あと<span style={{ fontWeight: 700, color: T.accent }}>{Math.max(0, 50 - totalCount)}件</span>で効率化ルールが解放されます</div>
-            <div style={{ height: 6, background: T.barBg, borderRadius: 3, marginTop: 10, overflow: "hidden" }}>
-              <div style={{ height: "100%", width: `${Math.min(100, totalCount / 50 * 100)}%`, background: T.accent, borderRadius: 3 }} />
+            <div style={{ fontSize: sz(13), color: T.textDim, marginBottom: 4 }}>📊 分析データを収集中...</div>
+            <div style={{ fontSize: sz(12), color: T.textMuted, lineHeight: 1.6 }}>
+              基本分析の開始まで: <span style={{ fontWeight: 700, color: T.accent }}>{Math.max(0, 30 - totalCount)}件</span> & <span style={{ fontWeight: 700, color: T.accent }}>{Math.max(0, 7 - workDaysCount)}日</span>
             </div>
           </div>
         )}
@@ -3746,7 +3914,7 @@ export default function App() {
               <span style={{ color: T.borderLight }}>│</span>
               <span style={{ fontSize: sz(12), color: "#22C55E" }}>配達{fd(actDelMs)}</span>
               <span style={{ color: T.borderLight }}>│</span>
-              <span style={{ fontSize: sz(12), color: "#EF4444" }}>無職{fd(wasteMs2)}</span>
+              <span style={{ fontSize: sz(12), color: "#EF4444" }}>待機{fd(wasteMs2)}</span>
               <span style={{ color: T.borderLight }}>│</span>
               <span style={{ fontSize: sz(12), color: T.textMuted }}>休憩{fd(tBrkMs)}</span>
               {(isOn || hasWrk) && <><span style={{ color: T.borderLight }}>│</span><span style={{ fontSize: sz(12), color: T.textMuted }}>{ft(data.sessions[0]?.start || data.currentSessionStart)}〜</span></>}
@@ -3788,7 +3956,7 @@ export default function App() {
                   const durMin = dur > 0 ? dur / 60000 : 0;
                   const perMin = durMin > 0 ? Math.round((d.reward || 0) / durMin) : 0;
                   return (
-                    <div key={i} onClick={() => openEdit(ri)} style={{ display: "flex", alignItems: "center", gap: 0, padding: "7px 0", borderBottom: i < data.deliveries.length - 1 ? `1px solid ${T.border}` : "none", cursor: "pointer" }}>
+                    <div key={i} onClick={() => { const canEdit = d.completeTime && (Date.now() - d.completeTime) <= 3600000; if (canEdit) openEdit(ri); }} style={{ display: "flex", alignItems: "center", gap: 0, padding: "7px 0", borderBottom: i < data.deliveries.length - 1 ? `1px solid ${T.border}` : "none", cursor: "pointer", opacity: d.completeTime && (Date.now() - d.completeTime) > 3600000 ? 0.6 : 1 }}>
                       <div style={{ width: 30, height: 30, borderRadius: 8, background: d.cancelled ? T.textFaint : (c?.bg || "#333"), color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: sz(15), fontWeight: 700, flexShrink: 0, marginRight: 8 }}>{c?.letter || "?"}</div>
                       <div style={{ flex: 1, minWidth: 0, marginRight: 6 }}>
                         {d.cancelled ? <div style={{ fontSize: sz(12), color: "#EF4444", fontWeight: 600 }}>キャンセル</div> : (
