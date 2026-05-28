@@ -381,6 +381,12 @@ export default function App() {
     if (!settings.autoOfflineHours || !data.currentSessionStart || data.currentLastActivityAt) return;
     update(d => { d.currentLastActivityAt = Date.now(); });
   }, [settings.autoOfflineHours, data.currentSessionStart, data.currentLastActivityAt, update]);
+  const escHtml = (value) => String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 
   // ─── Heatmap map lifecycle ───
   useEffect(() => {
@@ -616,7 +622,7 @@ export default function App() {
         if (perMin >= tier.min && perMin < tier.max) {
           const co = COS.find(cc => cc.id === d2.company);
           const marker = L.circleMarker([d2.startLat, d2.startLng], { radius: tier.radius, color: tier.color, fillColor: tier.color, fillOpacity: 0.75, weight: 2 })
-            .bindPopup(`<b>¥${Math.round(perMin)}/分</b><br/>${co?.name || "不明"} ¥${(d2.reward || 0).toLocaleString()}<br/>${fT(d2.orderTime)} (${Math.round(durMin)}分)<br/>${d2._date}<br/><span style="color:#888">📝 ${d2.memo ? d2.memo.replace(/</g,'&lt;').replace(/>/g,'&gt;') : 'メモなし'}</span>`)
+            .bindPopup(`<b>¥${Math.round(perMin)}/分</b><br/>${escHtml(co?.name || "不明")} ¥${(d2.reward || 0).toLocaleString()}<br/>${fT(d2.orderTime)} (${Math.round(durMin)}分)<br/>${d2._date}<br/><span style="color:#888">📝 ${d2.memo ? escHtml(d2.memo) : 'メモなし'}</span>`)
             .addTo(hvLayerRef.current);
           marker.on("click", () => {
             const isToday = d2._date === tds();
@@ -762,7 +768,7 @@ export default function App() {
         color, fillColor: color, fillOpacity: opacity, weight: 1, opacity: 0.4,
       }).bindPopup(
         `<div style="font-family:'Hiragino Sans',sans-serif;text-align:center;min-width:110px;">` +
-        (name ? `<div style="font-size:12px;font-weight:700;margin-bottom:2px;">${name}</div>` : "") +
+        (name ? `<div style="font-size:12px;font-weight:700;margin-bottom:2px;">${escHtml(name)}</div>` : "") +
         `<div style="font-size:20px;font-weight:800;color:${color};">¥${hourly.toLocaleString()}/h</div>` +
         `<div style="font-size:11px;color:#999;margin-top:2px;">${c.count}件の配達</div></div>`
       ).addTo(aaLayerRef.current);
