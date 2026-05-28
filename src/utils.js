@@ -63,15 +63,41 @@ export const fm = (m) => { if (!m || m <= 0) return "0分"; return `${Math.round
 export const dc = (d) => (OT.find(o => o.id === d.orderType)?.c || 1);
 
 // ─── Data helpers ───
-export const newDay = () => ({ date: tds(), weather: null, sessions: [], breaks: [], deliveries: [], dailyIncentives: [], jizoSessions: [], currentSessionStart: null, currentBreakStart: null, currentOrderTime: null, currentJizoStart: null });
-export const defaultSettings = () => ({ theme: "dark", incInGoal: true, incInReward: false, largeFont: false, workDays: [1, 2, 3, 4, 5], pickgoFeeRate: 15 });
+export const newDay = () => ({
+  date: tds(), weather: null, sessions: [], breaks: [], deliveries: [], dailyIncentives: [], jizoSessions: [], weatherSamples: [],
+  currentSessionStart: null, currentBreakStart: null, currentOrderTime: null, currentJizoStart: null, currentLastActivityAt: null,
+  currentStoreArrivalTime: null, currentStoreDepartTime: null, currentOrderPos: null, currentOrderWeather: null, currentStorePos: null, currentStoreWeather: null,
+});
+export const defaultSettings = () => ({ theme: "dark", incInGoal: true, incInReward: false, largeFont: false, workDays: [1, 2, 3, 4, 5], pickgoFeeRate: 15, rocketBonusRate: 0, autoOfflineHours: 0 });
 
 export const migrate = (d) => {
+  if (!d.deliveries) d.deliveries = [];
+  if (!d.breaks) d.breaks = [];
   if (!d.dailyIncentives) d.dailyIncentives = [];
   if (!d.jizoSessions) d.jizoSessions = [];
+  if (!Array.isArray(d.weatherSamples)) d.weatherSamples = [];
   if (d.onlineStart !== undefined) { d.sessions = d.sessions || []; if (d.onlineStart && d.onlineEnd) d.sessions.push({ start: d.onlineStart, end: d.onlineEnd }); else if (d.onlineStart) d.currentSessionStart = d.onlineStart; delete d.onlineStart; delete d.onlineEnd; }
-  if (!d.sessions) d.sessions = []; if (d.currentSessionStart === undefined) d.currentSessionStart = null; if (d.currentJizoStart === undefined) d.currentJizoStart = null;
-  d.deliveries.forEach(dl => { if (!dl.orderType) dl.orderType = "single"; if (dl.cancelled === undefined) dl.cancelled = false; if (dl.rating === undefined) dl.rating = null; if (dl.startLat === undefined) { dl.startLat = null; dl.startLng = null; dl.endLat = null; dl.endLng = null; } if (dl.apiWeather === undefined) dl.apiWeather = null; if (dl.areaName === undefined) dl.areaName = null; if (dl.memo === undefined) dl.memo = ""; });
+  if (!d.sessions) d.sessions = []; if (d.currentSessionStart === undefined) d.currentSessionStart = null; if (d.currentJizoStart === undefined) d.currentJizoStart = null; if (d.currentLastActivityAt === undefined) d.currentLastActivityAt = d.currentSessionStart || null;
+  if (d.currentStoreArrivalTime === undefined) d.currentStoreArrivalTime = null;
+  if (d.currentStoreDepartTime === undefined) d.currentStoreDepartTime = null;
+  if (d.currentOrderPos === undefined) d.currentOrderPos = null;
+  if (d.currentOrderWeather === undefined) d.currentOrderWeather = null;
+  if (d.currentStorePos === undefined) d.currentStorePos = null;
+  if (d.currentStoreWeather === undefined) d.currentStoreWeather = null;
+  d.deliveries.forEach(dl => {
+    if (!dl.orderType) dl.orderType = "single"; if (dl.cancelled === undefined) dl.cancelled = false; if (dl.cancelType === undefined) dl.cancelType = null; if (dl.rating === undefined) dl.rating = null;
+    if (dl.startLat === undefined) { dl.startLat = null; dl.startLng = null; dl.endLat = null; dl.endLng = null; }
+    if (dl.storeArrivalTime === undefined) dl.storeArrivalTime = null; if (dl.storeDepartTime === undefined) dl.storeDepartTime = null;
+    if (dl.storeLat === undefined) { dl.storeLat = null; dl.storeLng = null; }
+    if (dl.rocketBonusRate === undefined) dl.rocketBonusRate = 0;
+    if (dl.apiWeather === undefined) dl.apiWeather = null; if (dl.storeWeather === undefined) dl.storeWeather = null; if (dl.areaName === undefined) dl.areaName = null; if (dl.memo === undefined) dl.memo = "";
+  });
+  if (d.weatherSamples.length === 0) {
+    d.deliveries.forEach(dl => {
+      if (dl.apiWeather) d.weatherSamples.push({ time: dl.orderTime || dl.completeTime || null, source: "order", lat: dl.startLat ?? null, lng: dl.startLng ?? null, ...dl.apiWeather });
+      if (dl.storeWeather) d.weatherSamples.push({ time: dl.storeArrivalTime || dl.orderTime || null, source: "store", lat: dl.storeLat ?? null, lng: dl.storeLng ?? null, ...dl.storeWeather });
+    });
+  }
   return d;
 };
 

@@ -29,7 +29,7 @@ export const generateDemoLogs = () => {
     const startTime = new Date(d); startTime.setHours(startHour, rnd(0, 30), 0, 0);
     let cur = startTime.getTime();
 
-    const deliveries = [], breaks2 = [], jizoSessions = [], dailyIncentives = [];
+    const deliveries = [], breaks2 = [], jizoSessions = [], dailyIncentives = [], weatherSamples = [];
     const lunchStart = new Date(d); lunchStart.setHours(14, rnd(0, 30), 0, 0);
     const lunchEnd = new Date(lunchStart.getTime() + rnd(20, 40) * 60000);
     breaks2.push({ start: lunchStart.getTime(), end: lunchEnd.getTime() });
@@ -56,6 +56,7 @@ export const generateDemoLogs = () => {
       const demoWCode = wx === "sunny" ? rnd(0,1) : wx === "cloudy" ? rnd(2,3) : wx === "rain" ? rnd(51,55) : wx === "heavy_rain" ? rnd(80,82) : rnd(71,75);
       const demoPrecip = (wx === "rain" || wx === "heavy_rain") ? +(Math.random() * 8 + 0.2).toFixed(1) : wx === "snow" ? +(Math.random() * 3 + 0.1).toFixed(1) : 0;
       const demoApiW = { temperature: rnd(5, 35), windspeed: rnd(2, 30), weathercode: demoWCode, weatherId: wx, precipitation: demoPrecip };
+      weatherSamples.push({ time: oTime, source: "order", lat: sLat, lng: sLng, ...demoApiW });
       // Assign demo area name based on GPS position
       const demoAreas = ["紙屋町", "八丁堀", "本通", "袋町", "中町", "大手町", "幟町", "銀山町", "胡町", "立町"];
       const aIdx = Math.floor(((eLat - (HIR_LAT - HIR_R)) / (HIR_R * 2)) * demoAreas.length) % demoAreas.length;
@@ -73,7 +74,7 @@ export const generateDemoLogs = () => {
     return {
       date: dateStr, weather: wx,
       sessions: [{ start: startTime.getTime(), end: endTime }],
-      breaks: breaks2, deliveries, dailyIncentives, jizoSessions,
+      breaks: breaks2, deliveries, dailyIncentives, jizoSessions, weatherSamples,
       currentSessionStart: null, currentBreakStart: null, currentOrderTime: null, currentJizoStart: null,
     };
   };

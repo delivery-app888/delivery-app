@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid } from "recharts";
-import { storage } from "./db";
+import { storage, ensureDB } from "./db";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { DARK, LIGHT } from "./themes";
@@ -61,6 +61,7 @@ export default function App() {
   // reward
   const [rwCo, setRwCo] = useState(null); const [rwAmt, setRwAmt] = useState(""); const [rwInc, setRwInc] = useState(""); const [rwField, setRwField] = useState("reward"); const [rwType, setRwType] = useState("single");
   const [rwRating, setRwRating] = useState(null); // "good"|"normal"|"bad"|null (auto)
+  const [cancelType, setCancelType] = useState(null); // "before_store"|"store_wait"|null
   // daily inc
   const [diCo, setDiCo] = useState(null); const [diAmt, setDiAmt] = useState("");
   // edit
@@ -84,6 +85,18 @@ export default function App() {
   const hmMapRef = useRef(null);
   const hmElRef = useRef(null);
   const hmLayerRef = useRef(null);
+  // store wait map
+  const [swPeriod, setSwPeriod] = useState("today");
+  const [swCenter, setSwCenter] = useState(null);
+  const [swPinCount, setSwPinCount] = useState(0);
+  const [swTimeSlot, setSwTimeSlot] = useState("all");
+  const [swDow, setSwDow] = useState("all");
+  const [swCompany, setSwCompany] = useState("all");
+  const [swWeather, setSwWeather] = useState("all");
+  const [swDropdown, setSwDropdown] = useState(null);
+  const swMapRef = useRef(null);
+  const swElRef = useRef(null);
+  const swLayerRef = useRef(null);
   // area analysis
   const [aaCenter, setAaCenter] = useState(null);
   const [aaGeoProgress, setAaGeoProgress] = useState(null);
@@ -108,6 +121,7 @@ export default function App() {
   const [hrCompany, setHrCompany] = useState("all");
   const [hrWeather, setHrWeather] = useState("all");
   const [hrDropdown, setHrDropdown] = useState(null);
+  const [hwPeriod, setHwPeriod] = useState("month");
   // weekday analysis
   const [wdPeriod, setWdPeriod] = useState("today");
   const [wdTimeSlot, setWdTimeSlot] = useState("all");
@@ -127,19 +141,25 @@ export default function App() {
   const [upCompany, setUpCompany] = useState("all");
   const [upWeather, setUpWeather] = useState("all");
   const [upDropdown, setUpDropdown] = useState(null);
+  const [salesMode, setSalesMode] = useState("month");
+  const [salesMonth, setSalesMonth] = useState(ms());
+  const [salesYear, setSalesYear] = useState(String(new Date().getFullYear()));
   const [dailyReportDate, setDailyReportDate] = useState(tds());
   const prevScreen = useRef(screen);
   useEffect(() => {
     if (screen !== prevScreen.current) {
       if (screen === "ana_daily") { setDailyReportDate(tds()); }
       if (screen === "ana_heatmap") { setHmCenter(null); getPos().then(p => { if (p) setHmCenter([p.lat, p.lng]); }); setHmPeriod("today"); setHmTimeSlot("all"); setHmDow("all"); setHmCompany("all"); setHmWeather("all"); setHmDropdown(null); }
+      if (screen === "ana_storewait") { setSwCenter(null); getPos().then(p => { if (p) setSwCenter([p.lat, p.lng]); }); setSwPeriod("today"); setSwTimeSlot("all"); setSwDow("all"); setSwCompany("all"); setSwWeather("all"); setSwDropdown(null); }
       if (screen === "ana_area") { setAaCenter(null); getPos().then(p => { if (p) setAaCenter([p.lat, p.lng]); }); setAaPeriod("all"); setAaTimeSlot("all"); setAaDow("all"); setAaCompany("all"); setAaWeather("all"); setAaDropdown(null); }
       if (screen === "ana_highvalue") { setHvCenter(null); getPos().then(p => { if (p) setHvCenter([p.lat, p.lng]); }); }
       if (screen === "ana_hourly") { setHrPeriod("today"); setHrDow("all"); setHrCompany("all"); setHrWeather("all"); setHrDropdown(null); }
+      if (screen === "ana_hourwage") { setHwPeriod("month"); }
       if (screen === "ana_weekday") { setWdPeriod("today"); setWdTimeSlot("all"); setWdCompany("all"); setWdWeather("all"); setWdDropdown(null); }
       if (screen === "ana_company") { setCoPeriod("today"); setCoTimeSlot("all"); setCoDow("all"); setCoWeather("all"); setCoDropdown(null); }
       if (screen === "ana_unitprice") { setUpPeriod("today"); setUpTimeSlot("all"); setUpDow("all"); setUpCompany("all"); setUpWeather("all"); setUpDropdown(null); }
-      if (screen === "history") { setHistDetail(null); setHistExpanded({}); }
+      if (screen === "ana_sales") { setSalesMode("month"); setSalesMonth(ms()); setSalesYear(String(new Date().getFullYear())); }
+      if (screen === "history") { setHistDetail(null); setHistExpanded({}); setHistWorkEdit(null); setHistIncEdit(null); }
       prevScreen.current = screen;
     }
   }, [screen]);
@@ -156,11 +176,35 @@ export default function App() {
   // History
   const [histDetail, setHistDetail] = useState(null);
   const [histExpanded, setHistExpanded] = useState({});
+  const [histWorkEdit, setHistWorkEdit] = useState(null);
+  const [histIncEdit, setHistIncEdit] = useState(null);
+  const [actionToast, setActionToast] = useState(null);
 
 
   const T = settings.theme === "light" ? LIGHT : DARK;
   // Font scale: large mode bumps small text to minimum 13px
   const sz = (n) => settings.largeFont ? (n < 12 ? 13 : n < 18 ? n + 3 : n < 24 ? n + 2 : n + 1) : n;
+  const closeActiveLogAt = (log, endTs) => {
+    const next = {
+      ...log,
+      sessions: [...(log.sessions || [])],
+      breaks: [...(log.breaks || [])],
+      jizoSessions: [...(log.jizoSessions || [])],
+      deliveries: [...(log.deliveries || [])],
+      dailyIncentives: [...(log.dailyIncentives || [])],
+      weatherSamples: [...(log.weatherSamples || [])],
+    };
+    const end = Math.max(next.currentSessionStart || endTs, endTs);
+    if (next.currentBreakStart && end > next.currentBreakStart) next.breaks.push({ start: next.currentBreakStart, end });
+    if (next.currentJizoStart && end > next.currentJizoStart) next.jizoSessions.push({ start: next.currentJizoStart, end });
+    if (next.currentSessionStart && end > next.currentSessionStart) next.sessions.push({ start: next.currentSessionStart, end });
+    next.currentSessionStart = null;
+    next.currentBreakStart = null;
+    next.currentJizoStart = null;
+    next.currentLastActivityAt = null;
+    return next;
+  };
+  const autoOfflineMsFor = (s) => (s?.autoOfflineHours || 0) > 0 ? (s.autoOfflineHours * 3600000) : 0;
 
   const lastDateRef = useRef(tds());
   useEffect(() => {
@@ -173,7 +217,7 @@ export default function App() {
         lastDateRef.current = today;
         setData(prev => {
           const midnight = new Date(today + "T00:00:00").getTime();
-          const updated = { ...prev, sessions: [...prev.sessions], breaks: [...prev.breaks], jizoSessions: [...prev.jizoSessions], deliveries: [...prev.deliveries], dailyIncentives: [...prev.dailyIncentives] };
+          const updated = { ...prev, sessions: [...prev.sessions], breaks: [...prev.breaks], jizoSessions: [...prev.jizoSessions], deliveries: [...prev.deliveries], dailyIncentives: [...prev.dailyIncentives], weatherSamples: [...(prev.weatherSamples || [])] };
           // Close active session at 23:59:59.999 and save previous day
           if (updated.currentSessionStart) {
             updated.sessions.push({ start: updated.currentSessionStart, end: midnight - 1 });
@@ -187,8 +231,8 @@ export default function App() {
             updated.jizoSessions.push({ start: updated.currentJizoStart, end: midnight - 1 });
             updated.currentJizoStart = null;
           }
-          // Save previous day's data
-          svByDate(updated.date, updated);
+          // Save previous day's data (fire-and-forget but with error logging)
+          svByDate(updated.date, updated).catch(err => console.error('[日跨ぎ] 前日データ保存失敗:', err));
           // Add previous day to allLogs
           setAllLogs(prevLogs => [updated, ...prevLogs.filter(l => l.date !== updated.date)]);
           // Create new day with active session/break/jizo continuing from midnight
@@ -196,10 +240,15 @@ export default function App() {
           newDayData.currentSessionStart = prev.currentSessionStart ? midnight : null;
           newDayData.currentBreakStart = prev.currentBreakStart ? midnight : null;
           newDayData.currentJizoStart = prev.currentJizoStart ? midnight : null;
+          newDayData.currentLastActivityAt = prev.currentSessionStart ? (prev.currentLastActivityAt || midnight) : null;
           // Carry over currentOrderTime if mid-delivery (will be saved to previous day on completion)
           newDayData.currentOrderTime = prev.currentOrderTime || null;
           newDayData.currentOrderPos = prev.currentOrderPos || null;
           newDayData.currentOrderWeather = prev.currentOrderWeather || null;
+          newDayData.currentStoreArrivalTime = prev.currentStoreArrivalTime || null;
+          newDayData.currentStoreDepartTime = prev.currentStoreDepartTime || null;
+          newDayData.currentStorePos = prev.currentStorePos || null;
+          newDayData.currentStoreWeather = prev.currentStoreWeather || null;
           return newDayData;
         });
       }
@@ -207,29 +256,60 @@ export default function App() {
     return () => clearInterval(t);
   }, [screen]);
   useEffect(() => { (async () => {
+    // データベースの準備完了を確実に待つ
+    await ensureDB();
     const today = tds();
-    const saved = await lt(); if (saved) setData(migrate(saved));
+    const s = await ls();
+    const loadedSettings = { ...defaultSettings(), ...(s || {}) };
+    setSettings(loadedSettings);
+    const autoLimitMs = autoOfflineMsFor(loadedSettings);
+    const saved = await lt();
+    let todayData = saved ? migrate(saved) : null;
+    if (todayData?.currentSessionStart && autoLimitMs && todayData.currentLastActivityAt && !todayData.currentOrderTime) {
+      const cutoff = todayData.currentLastActivityAt + autoLimitMs;
+      if (Date.now() >= cutoff) todayData = closeActiveLogAt(todayData, cutoff);
+    }
+    if (todayData) setData(todayData);
     // Check for active session from a previous day and split it
-    let all = await la();
+    let all = (await la()).map(migrate);
     const activeLog = all.find(l => l.date && l.date !== today && l.currentSessionStart);
     if (activeLog) {
       const midnight = new Date(today + "T00:00:00").getTime();
-      // Close previous day's active states at midnight
-      if (activeLog.currentSessionStart) { activeLog.sessions.push({ start: activeLog.currentSessionStart, end: midnight - 1 }); activeLog.currentSessionStart = null; }
-      if (activeLog.currentBreakStart) { activeLog.breaks.push({ start: activeLog.currentBreakStart, end: midnight - 1 }); activeLog.currentBreakStart = null; }
-      if (activeLog.currentJizoStart) { activeLog.jizoSessions.push({ start: activeLog.currentJizoStart, end: midnight - 1 }); activeLog.currentJizoStart = null; }
-      await svByDate(activeLog.date, activeLog);
-      // Start today with session continuing from midnight
-      const todaySaved = saved || newDay();
-      if (!todaySaved.currentSessionStart) todaySaved.currentSessionStart = midnight;
-      if (activeLog.currentBreakStart !== null) todaySaved.currentBreakStart = midnight;
-      // Carry over mid-delivery state
-      if (activeLog.currentOrderTime) { todaySaved.currentOrderTime = activeLog.currentOrderTime; todaySaved.currentOrderPos = activeLog.currentOrderPos; todaySaved.currentOrderWeather = activeLog.currentOrderWeather; }
-      setData(migrate(todaySaved));
+      const cutoff = autoLimitMs && activeLog.currentLastActivityAt && !activeLog.currentOrderTime ? activeLog.currentLastActivityAt + autoLimitMs : null;
+      const todaySaved = todayData || newDay();
+      if (cutoff && cutoff < midnight) {
+        const closed = closeActiveLogAt(activeLog, cutoff);
+        await svByDate(activeLog.date, closed);
+        setData(migrate(todaySaved));
+      } else {
+        const wasBreak = !!activeLog.currentBreakStart;
+        const wasJizo = !!activeLog.currentJizoStart;
+        // Close previous day's active states at midnight
+        if (activeLog.currentSessionStart) { activeLog.sessions.push({ start: activeLog.currentSessionStart, end: midnight - 1 }); activeLog.currentSessionStart = null; }
+        if (activeLog.currentBreakStart) { activeLog.breaks.push({ start: activeLog.currentBreakStart, end: midnight - 1 }); activeLog.currentBreakStart = null; }
+        if (activeLog.currentJizoStart) { activeLog.jizoSessions.push({ start: activeLog.currentJizoStart, end: midnight - 1 }); activeLog.currentJizoStart = null; }
+        await svByDate(activeLog.date, activeLog);
+        // Start today with session continuing from midnight
+        if (!todaySaved.currentSessionStart) todaySaved.currentSessionStart = midnight;
+        if (wasBreak) todaySaved.currentBreakStart = midnight;
+        if (wasJizo) todaySaved.currentJizoStart = midnight;
+        todaySaved.currentLastActivityAt = activeLog.currentLastActivityAt || midnight;
+        // Carry over mid-delivery state
+        if (activeLog.currentOrderTime) {
+          todaySaved.currentOrderTime = activeLog.currentOrderTime;
+          todaySaved.currentOrderPos = activeLog.currentOrderPos;
+          todaySaved.currentOrderWeather = activeLog.currentOrderWeather;
+          todaySaved.currentStoreArrivalTime = activeLog.currentStoreArrivalTime || null;
+          todaySaved.currentStoreDepartTime = activeLog.currentStoreDepartTime || null;
+          todaySaved.currentStorePos = activeLog.currentStorePos || null;
+          todaySaved.currentStoreWeather = activeLog.currentStoreWeather || null;
+        }
+        if (cutoff && Date.now() >= cutoff && !todaySaved.currentOrderTime) setData(migrate(closeActiveLogAt(todaySaved, cutoff)));
+        else setData(migrate(todaySaved));
+      }
     }
     const g = await lg(); if (g?.amount) { const curMonth = ms(); if (!g.month || g.month === curMonth) setGoal(g.amount); }
-    const s = await ls(); if (s) setSettings({ ...defaultSettings(), ...s });
-    all = await la();
+    all = (await la()).map(migrate);
     setAllLogs(all.filter(l => l.date !== today));
     // Show tutorial on first launch
     try { const tutDone = await storage.get("tutorial-done"); if (!tutDone) setTutorial(true); } catch { setTutorial(true); }
@@ -238,8 +318,69 @@ export default function App() {
 
   const saveRef = useRef(null);
   useEffect(() => { if (loading) return; if (saveRef.current) clearTimeout(saveRef.current); saveRef.current = setTimeout(() => sv(data), 300); }, [data, loading]);
-  const update = useCallback((fn) => { setData(p => { const n = { ...p, sessions: [...p.sessions], breaks: [...p.breaks], deliveries: [...p.deliveries], dailyIncentives: [...p.dailyIncentives], jizoSessions: [...p.jizoSessions] }; fn(n); return n; }); }, []);
+  const update = useCallback((fn) => { setData(p => { const n = { ...p, sessions: [...p.sessions], breaks: [...p.breaks], deliveries: [...p.deliveries], dailyIncentives: [...p.dailyIncentives], jizoSessions: [...p.jizoSessions], weatherSamples: [...(p.weatherSamples || [])] }; fn(n); return n; }); }, []);
   const updateSettings = (patch) => { const n = { ...settings, ...patch }; setSettings(n); ss(n); };
+  const runAutoOfflineCheck = useCallback(() => {
+    const limitMs = autoOfflineMsFor(settings);
+    if (!limitMs) return;
+    let closedAt = null;
+    setData(prev => {
+      if (!prev.currentSessionStart || !prev.currentLastActivityAt || prev.currentOrderTime) return prev;
+      const cutoff = prev.currentLastActivityAt + limitMs;
+      if (Date.now() < cutoff) return prev;
+      closedAt = cutoff;
+      return closeActiveLogAt(prev, cutoff);
+    });
+    if (closedAt) {
+      setActionToast(`✓ ${ft(closedAt)}に自動オフライン`);
+      setTimeout(() => setActionToast(null), 2200);
+    }
+  }, [settings.autoOfflineHours]);
+  const markUserActivity = useCallback(() => {
+    if (loading) return;
+    const limitMs = autoOfflineMsFor(settings);
+    let closedAt = null;
+    const nowTs = Date.now();
+    setData(prev => {
+      if (!prev.currentSessionStart) return prev;
+      if (limitMs && prev.currentLastActivityAt && !prev.currentOrderTime) {
+        const cutoff = prev.currentLastActivityAt + limitMs;
+        if (nowTs >= cutoff) {
+          closedAt = cutoff;
+          return closeActiveLogAt(prev, cutoff);
+        }
+      }
+      if (prev.currentLastActivityAt && nowTs - prev.currentLastActivityAt < 15000) return prev;
+      return { ...prev, currentLastActivityAt: nowTs };
+    });
+    if (closedAt) {
+      setActionToast(`✓ ${ft(closedAt)}に自動オフライン`);
+      setTimeout(() => setActionToast(null), 2200);
+    }
+  }, [loading, settings.autoOfflineHours]);
+  useEffect(() => {
+    if (loading || !settings.autoOfflineHours) return;
+    const events = ["pointerdown", "keydown", "touchstart"];
+    events.forEach(ev => window.addEventListener(ev, markUserActivity, { capture: true, passive: true }));
+    return () => events.forEach(ev => window.removeEventListener(ev, markUserActivity, { capture: true }));
+  }, [loading, settings.autoOfflineHours, markUserActivity]);
+  useEffect(() => {
+    if (loading || !settings.autoOfflineHours) return;
+    const id = setInterval(runAutoOfflineCheck, 60000);
+    const onWake = () => runAutoOfflineCheck();
+    window.addEventListener("focus", onWake);
+    document.addEventListener("visibilitychange", onWake);
+    runAutoOfflineCheck();
+    return () => {
+      clearInterval(id);
+      window.removeEventListener("focus", onWake);
+      document.removeEventListener("visibilitychange", onWake);
+    };
+  }, [loading, settings.autoOfflineHours, runAutoOfflineCheck]);
+  useEffect(() => {
+    if (!settings.autoOfflineHours || !data.currentSessionStart || data.currentLastActivityAt) return;
+    update(d => { d.currentLastActivityAt = Date.now(); });
+  }, [settings.autoOfflineHours, data.currentSessionStart, data.currentLastActivityAt, update]);
 
   // ─── Heatmap map lifecycle ───
   useEffect(() => {
@@ -326,12 +467,100 @@ export default function App() {
     filt.forEach(d2 => {
       const c = d2.cancelled ? RC.cancelled : RC[d2.rating] || RC.normal;
       const co2 = d2.company || "不明";
-      const rw2 = d2.cancelled ? "キャンセル" : `¥${(d2.reward || 0).toLocaleString()}`;
+      const rw2 = d2.cancelled ? (d2.cancelType === "before_store" ? "未到着キャンセル" : "調理待ちキャンセル") : `¥${(d2.reward || 0).toLocaleString()}`;
       const wInfo = d2.apiWeather ? `<br/>${d2.apiWeather.temperature}℃ 風${d2.apiWeather.windspeed}km/h${d2.apiWeather.precipitation != null ? ` 雨${d2.apiWeather.precipitation}mm` : ""}` : "";
       if (d2.startLat && d2.startLng) L.circleMarker([d2.startLat, d2.startLng], { radius: 6, color: c, fillColor: c, fillOpacity: 0.7, weight: 2 }).bindPopup(`<b>受注</b> ${fT(d2.orderTime)}<br/>${co2} ${rw2}${wInfo}`).addTo(hmLayerRef.current);
     });
     setHmPinCount(filt.length);
   }, [screen, hmPeriod, hmTimeSlot, hmDow, hmCompany, hmWeather, allLogs, data, isPremium]);
+
+  // ─── Store wait map lifecycle ───
+  useEffect(() => {
+    const isSw = screen === "ana_storewait";
+    if (!isSw) {
+      if (swMapRef.current) { swMapRef.current.remove(); swMapRef.current = null; }
+      return;
+    }
+    const el = swElRef.current;
+    if (!el || swMapRef.current) return;
+    const center = swCenter || [35.6812, 139.7671];
+    const map = L.map(el, { zoomControl: false, attributionControl: false }).setView(center, 14);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
+    swMapRef.current = map;
+    swLayerRef.current = L.layerGroup().addTo(map);
+    setTimeout(() => map.invalidateSize(), 200);
+  }, [screen]);
+
+  const swLocRef = useRef(null);
+  useEffect(() => {
+    if (swMapRef.current && swCenter) {
+      swMapRef.current.setView(swCenter, 14, { animate: true });
+      setTimeout(() => { if (swMapRef.current) swMapRef.current.invalidateSize(); }, 200);
+      if (!swLocRef.current) {
+        const locIcon = L.divIcon({ className: "", html: '<div style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;"><div style="position:absolute;width:40px;height:40px;border-radius:50%;background:#4285F433;animation:loc-ripple 2s ease-out infinite;"></div><div style="position:absolute;width:28px;height:28px;border-radius:50%;background:#4285F422;animation:loc-ripple 2s ease-out 0.6s infinite;"></div><div style="position:relative;width:16px;height:16px;background:#4285F4;border:3px solid #fff;border-radius:50%;box-shadow:0 0 8px #4285F466;z-index:1;"></div></div><style>@keyframes loc-ripple{0%{transform:scale(0.5);opacity:1}100%{transform:scale(1.8);opacity:0}}</style>', iconSize: [40, 40], iconAnchor: [20, 20] });
+        swLocRef.current = L.marker(swCenter, { icon: locIcon, zIndexOffset: 1000 }).bindPopup("現在地").addTo(swMapRef.current);
+      }
+    }
+    if (screen !== "ana_storewait") swLocRef.current = null;
+  }, [swCenter, screen]);
+
+  useEffect(() => {
+    if (screen !== "ana_storewait" || !swLayerRef.current) return;
+    const todayStr2 = tds();
+    const nowMs2 = Date.now();
+    const msDay2 = 86400000;
+    const allWaits = [
+      ...allLogs.flatMap(l2 => (l2.deliveries || []).filter(d2 => d2.storeLat && d2.storeLng && d2.storeArrivalTime).map(d2 => ({ ...d2, _date: l2.date }))),
+      ...data.deliveries.filter(d2 => d2.storeLat && d2.storeLng && d2.storeArrivalTime).map(d2 => ({ ...d2, _date: data.date })),
+    ].map(d2 => {
+      const waitMs = Math.max(0, (d2.storeDepartTime || d2.completeTime || nowMs2) - d2.storeArrivalTime);
+      return { ...d2, _waitMs: waitMs, _waitMin: Math.round(waitMs / 60000) };
+    }).filter(d2 => d2._waitMs >= 300000 || (d2.cancelled && d2.cancelType === "store_wait"));
+
+    const per = swPeriod || "today";
+    const pFree = per === "today";
+    const canV = pFree || isPremium;
+    let filt = [];
+    if (canV) {
+      if (per === "today") { filt = allWaits.filter(d2 => d2._date === todayStr2); }
+      else {
+        const cut = per === "week" ? 7 : per === "month" ? 30 : per === "half" ? 180 : per === "year" ? 365 : 99999;
+        const mD = new Date(nowMs2 - cut * msDay2);
+        const mS = `${mD.getFullYear()}-${String(mD.getMonth()+1).padStart(2,"0")}-${String(mD.getDate()).padStart(2,"0")}`;
+        filt = allWaits.filter(d2 => d2._date >= mS);
+      }
+    }
+    if (swTimeSlot !== "all") {
+      const slots = { morning: [6, 10], lunch: [11, 14], afternoon: [15, 17], dinner: [18, 21], night: [22, 5] };
+      const [sH, eH] = slots[swTimeSlot] || [0, 23];
+      filt = filt.filter(d2 => {
+        const h = new Date(d2.storeArrivalTime || d2.orderTime).getHours();
+        return sH <= eH ? (h >= sH && h <= eH) : (h >= sH || h <= eH);
+      });
+    }
+    if (swDow !== "all") {
+      const dowMap = { mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6, sun: 0 };
+      const target = dowMap[swDow];
+      if (target !== undefined) filt = filt.filter(d2 => new Date(d2.storeArrivalTime || d2.orderTime).getDay() === target);
+    }
+    if (swCompany !== "all") filt = filt.filter(d2 => d2.company === swCompany);
+    if (swWeather !== "all") {
+      const wxDates = new Set([...allLogs, data].filter(l => l.weather === swWeather).map(l => l.date));
+      filt = filt.filter(d2 => wxDates.has(d2._date));
+    }
+
+    swLayerRef.current.clearLayers();
+    const fT = (t2) => { if (!t2) return ""; const dt2 = new Date(t2); return `${dt2.getHours()}:${String(dt2.getMinutes()).padStart(2, "0")}`; };
+    const waitColor = (min, cancelled) => cancelled ? "#EF4444" : min >= 15 ? "#EF4444" : min >= 10 ? "#F59E0B" : "#A855F7";
+    filt.forEach(d2 => {
+      const color = waitColor(d2._waitMin, d2.cancelled);
+      const co2 = COS.find(c => c.id === d2.company)?.name || d2.company || "不明";
+      const label = d2.cancelled ? "調理待ちキャンセル" : `店舗待機 ${d2._waitMin}分`;
+      const rw2 = d2.cancelled ? "" : `<br/>報酬 ¥${(d2.reward || 0).toLocaleString()}`;
+      L.circleMarker([d2.storeLat, d2.storeLng], { radius: 9, color, fillColor: color, fillOpacity: 0.85, weight: 2 }).bindPopup(`<b>店舗</b> ${fT(d2.storeArrivalTime)}<br/>${co2}<br/>${label}${rw2}`).addTo(swLayerRef.current);
+    });
+    setSwPinCount(filt.length);
+  }, [screen, swPeriod, swTimeSlot, swDow, swCompany, swWeather, allLogs, data, isPremium]);
 
   // ─── High-value heatmap lifecycle ───
   useEffect(() => {
@@ -585,6 +814,8 @@ export default function App() {
 
   // ─── Computed ───
   const isOn = !!data.currentSessionStart; const isBrk = !!data.currentBreakStart; const hasOrd = !!data.currentOrderTime; const isJz = !!data.currentJizoStart;
+  const hasStoreArrived = !!data.currentStoreArrivalTime;
+  const hasStoreDeparted = !!data.currentStoreDepartTime;
   const hasWrk = data.sessions.length > 0 || isOn;
   const actDels = data.deliveries.filter(d => !d.cancelled);
   const canCnt = data.deliveries.filter(d => d.cancelled).length;
@@ -652,18 +883,365 @@ export default function App() {
   const cumRev = allLogs.reduce((s, l) => s + dayRev(l, false), 0) + totRew;
 
   // ─── Average unit price (delivery-count based, with past fallback) ───
-  const pastAvgUnit = (() => { let r = 0, c = 0; allLogs.forEach(l => { const ds = (l.deliveries || []).filter(d => !d.cancelled); r += ds.reduce((s, d) => s + (d.reward || 0), 0); c += ds.length; }); return c > 0 ? Math.round(r / c) : 500; })();
-  const avgUnitForGuide = actDels.length > 0 ? Math.round(totRew / actDels.length) : pastAvgUnit;
+  const medianCalc = (arr) => { if (!arr.length) return 0; const s = [...arr].sort((a, b) => a - b); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+  const pastAvgUnit = (() => { const allRews = []; allLogs.forEach(l => { (l.deliveries || []).filter(d => !d.cancelled).forEach(d => { if (d.reward > 0) allRews.push(d.reward); }); }); return allRews.length > 0 ? Math.round(medianCalc(allRews)) : 500; })();
+  const avgUnitForGuide = actDels.length > 0 ? Math.round(medianCalc(actDels.map(d => d.reward || 0))) : pastAvgUnit;
 
   // ─── Action feedback toast ───
-  const [actionToast, setActionToast] = useState(null);
   const pulse = (name) => {
-    const msgs = { online: "✓ オンライン開始", brkS: "☕ 休憩開始", brkE: "✓ 休憩終了", order: "📦 受注しました", complete: "✓ 報酬入力へ" };
+    const msgs = { online: "✓ オンライン開始", brkS: "☕ 休憩開始", brkE: "✓ 休憩終了", order: "📦 受注しました", storeArrive: "✓ 店舗到着", storeDepart: "✓ 店舗出発", complete: "✓ 報酬入力へ", cancel: "✓ キャンセル記録" };
     setActionToast(msgs[name] || "✓");
     setTimeout(() => setActionToast(null), 1200);
   };
   // Keep flashBtn as pass-through (no visual change on button itself)
   const flashBtn = (bg, dis, h, _name) => btn(bg, dis, h);
+
+  const csvCell = (value) => {
+    if (value === null || value === undefined) return "";
+    const text = typeof value === "object" ? JSON.stringify(value) : String(value);
+    return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+  const fmtDateTime = (ts) => {
+    if (!ts) return "";
+    const d = new Date(ts);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+  };
+  const roundMin = (v) => v > 0 ? Math.round((v / 60000) * 10) / 10 : 0;
+  const makeWeatherSample = (source, pos, weather) => ({
+    time: Date.now(),
+    source,
+    lat: pos?.lat ?? null,
+    lng: pos?.lng ?? null,
+    temperature: weather?.temperature ?? null,
+    windspeed: weather?.windspeed ?? null,
+    weathercode: weather?.weathercode ?? null,
+    weatherId: weather?.weatherId ?? null,
+    precipitation: weather?.precipitation ?? null,
+  });
+  const weatherSamplesForLog = (log) => {
+    if (!log) return [];
+    const stored = (log.weatherSamples || []).filter(s => s && (s.precipitation !== undefined || s.temperature !== undefined || s.windspeed !== undefined));
+    if (stored.length > 0) return stored;
+    return (log.deliveries || []).flatMap(d => {
+      const rows = [];
+      if (d.apiWeather) rows.push({ time: d.orderTime || d.completeTime || null, source: "order", lat: d.startLat ?? null, lng: d.startLng ?? null, ...d.apiWeather });
+      if (d.storeWeather) rows.push({ time: d.storeArrivalTime || d.orderTime || null, source: "store", lat: d.storeLat ?? null, lng: d.storeLng ?? null, ...d.storeWeather });
+      return rows;
+    });
+  };
+  const rainStatsForLog = (log) => {
+    const samples = weatherSamplesForLog(log).filter(s => s.precipitation !== null && s.precipitation !== undefined && !Number.isNaN(Number(s.precipitation)));
+    const vals = samples.map(s => Number(s.precipitation));
+    const max = vals.length ? Math.max(...vals) : null;
+    const avg = vals.length ? Math.round((vals.reduce((s, v) => s + v, 0) / vals.length) * 10) / 10 : null;
+    const rainy = vals.filter(v => v > 0).length;
+    const level = max == null ? "未取得" : max === 0 ? "雨なし" : max <= 2 ? "小雨" : max <= 5 ? "雨" : "大雨";
+    return { samples: samples.length, rainy, max, avg, level };
+  };
+  const downloadCsvText = () => {
+    const logsByDate = new Map();
+    allLogs.forEach(l => { if (l?.date) logsByDate.set(l.date, l); });
+    if (data?.date) logsByDate.set(data.date, data);
+    const logs = [...logsByDate.values()].filter(l => l?.date).sort((a, b) => a.date.localeCompare(b.date));
+    if (logs.length === 0) {
+      setPopup({ msg: "出力できるデータがありません", onConfirm: () => setPopup(null) });
+      return;
+    }
+    const columns = [
+      "record_type", "date", "index", "company", "company_name", "order_type", "cancelled", "cancel_type", "rating", "manual_weather",
+      "start_time", "end_time", "order_time", "store_arrival_time", "store_depart_time", "complete_time",
+      "duration_minutes", "online_minutes", "break_minutes", "jizo_minutes", "work_minutes", "delivery_count",
+      "raw_reward", "reward", "incentive", "total_amount", "per_min", "rocket_bonus_rate",
+      "start_lat", "start_lng", "store_lat", "store_lng", "end_lat", "end_lng",
+      "weather_source", "api_weather_id", "temperature", "windspeed", "precipitation", "precipitation_avg", "precipitation_max", "precipitation_samples", "rain_level", "area_name", "memo"
+    ];
+    const rows = [];
+    const pushRow = (patch) => rows.push(Object.fromEntries(columns.map(c => [c, patch[c] ?? ""])));
+    const companyName = (id) => COS.find(c => c.id === id)?.name || "";
+    const currentExportTime = Date.now();
+
+    logs.forEach(log => {
+      const deliveries = log.deliveries || [];
+      const dailyIncentives = log.dailyIncentives || [];
+      const sessions = log.sessions || [];
+      const breaks = log.breaks || [];
+      const jizoSessions = log.jizoSessions || [];
+      const weatherSamples = weatherSamplesForLog(log);
+      const rainStats = rainStatsForLog(log);
+      const sessionMs = sessions.reduce((s, x) => s + ((x.end || currentExportTime) - x.start), 0) + (log.currentSessionStart ? currentExportTime - log.currentSessionStart : 0);
+      const breakMs = breaks.reduce((s, b) => s + ((b.end || currentExportTime) - b.start), 0) + (log.currentBreakStart ? currentExportTime - log.currentBreakStart : 0);
+      const jizoMs = jizoSessions.reduce((s, j) => s + ((j.end || currentExportTime) - j.start), 0) + (log.currentJizoStart ? currentExportTime - log.currentJizoStart : 0);
+      const activeDeliveries = deliveries.filter(d => !d.cancelled);
+      const reward = activeDeliveries.reduce((s, d) => s + (d.reward || 0), 0);
+      const deliveryIncentive = activeDeliveries.reduce((s, d) => s + (d.incentive || 0), 0);
+      const dailyIncentive = dailyIncentives.reduce((s, d) => s + (d.amount || 0), 0);
+      const totalIncentive = deliveryIncentive + dailyIncentive;
+      const workMs = Math.max(0, sessionMs - breakMs);
+      pushRow({
+        record_type: "day_summary", date: log.date, manual_weather: log.weather,
+        online_minutes: roundMin(sessionMs), break_minutes: roundMin(breakMs), jizo_minutes: roundMin(jizoMs), work_minutes: roundMin(workMs),
+        delivery_count: activeDeliveries.reduce((s, d) => s + dc(d), 0),
+        reward, incentive: totalIncentive, total_amount: reward + totalIncentive,
+        precipitation_avg: rainStats.avg ?? "", precipitation_max: rainStats.max ?? "", precipitation_samples: rainStats.samples, rain_level: rainStats.level,
+      });
+      weatherSamples.forEach((w, i) => pushRow({
+        record_type: "weather_sample", date: log.date, index: i + 1, weather_source: w.source || "",
+        start_time: fmtDateTime(w.time), start_lat: w.lat, start_lng: w.lng,
+        api_weather_id: w.weatherId || "", temperature: w.temperature ?? "", windspeed: w.windspeed ?? "",
+        precipitation: w.precipitation ?? "",
+      }));
+      sessions.forEach((s, i) => pushRow({
+        record_type: "session", date: log.date, index: i + 1, start_time: fmtDateTime(s.start), end_time: fmtDateTime(s.end),
+        duration_minutes: roundMin((s.end || currentExportTime) - s.start),
+      }));
+      if (log.currentSessionStart) pushRow({
+        record_type: "session_current", date: log.date, index: sessions.length + 1, start_time: fmtDateTime(log.currentSessionStart),
+        duration_minutes: roundMin(currentExportTime - log.currentSessionStart),
+      });
+      breaks.forEach((b, i) => pushRow({
+        record_type: "break", date: log.date, index: i + 1, start_time: fmtDateTime(b.start), end_time: fmtDateTime(b.end),
+        duration_minutes: roundMin((b.end || currentExportTime) - b.start),
+      }));
+      if (log.currentBreakStart) pushRow({
+        record_type: "break_current", date: log.date, index: breaks.length + 1, start_time: fmtDateTime(log.currentBreakStart),
+        duration_minutes: roundMin(currentExportTime - log.currentBreakStart),
+      });
+      jizoSessions.forEach((j, i) => pushRow({
+        record_type: "jizo", date: log.date, index: i + 1, start_time: fmtDateTime(j.start), end_time: fmtDateTime(j.end),
+        duration_minutes: roundMin((j.end || currentExportTime) - j.start),
+      }));
+      if (log.currentJizoStart) pushRow({
+        record_type: "jizo_current", date: log.date, index: jizoSessions.length + 1, start_time: fmtDateTime(log.currentJizoStart),
+        duration_minutes: roundMin(currentExportTime - log.currentJizoStart),
+      });
+      deliveries.forEach((d, i) => {
+        const duration = d.orderTime && d.completeTime ? d.completeTime - d.orderTime : 0;
+        const durationMinutes = roundMin(duration);
+        pushRow({
+          record_type: "delivery", date: log.date, index: i + 1, company: d.company, company_name: companyName(d.company),
+          order_type: d.orderType || "single", cancelled: d.cancelled ? 1 : 0, cancel_type: d.cancelType || "", rating: d.rating || "", manual_weather: log.weather,
+          order_time: fmtDateTime(d.orderTime), store_arrival_time: fmtDateTime(d.storeArrivalTime), store_depart_time: fmtDateTime(d.storeDepartTime), complete_time: fmtDateTime(d.completeTime),
+          duration_minutes: durationMinutes, delivery_count: dc(d),
+          raw_reward: d.rawReward || "", reward: d.reward || 0, incentive: d.incentive || 0, total_amount: (d.reward || 0) + (d.incentive || 0),
+          rocket_bonus_rate: d.rocketBonusRate || "",
+          per_min: durationMinutes > 0 && !d.cancelled ? Math.round(((d.reward || 0) / durationMinutes) * 10) / 10 : "",
+          start_lat: d.startLat, start_lng: d.startLng, store_lat: d.storeLat, store_lng: d.storeLng, end_lat: d.endLat, end_lng: d.endLng,
+          weather_source: d.apiWeather ? "order" : "", api_weather_id: d.apiWeather?.weatherId || "", temperature: d.apiWeather?.temperature ?? "", windspeed: d.apiWeather?.windspeed ?? "",
+          precipitation: d.apiWeather?.precipitation ?? "", area_name: d.areaName || "", memo: d.memo || "",
+        });
+      });
+      dailyIncentives.forEach((di, i) => pushRow({
+        record_type: "daily_incentive", date: log.date, index: i + 1, company: di.company, company_name: companyName(di.company),
+        start_time: fmtDateTime(di.time), incentive: di.amount || 0, total_amount: di.amount || 0,
+      }));
+    });
+
+    const csv = [columns.join(","), ...rows.map(row => columns.map(c => csvCell(row[c])).join(","))].join("\n");
+    const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const stamp = fmtDateTime(Date.now()).replace(/[-: ]/g, "");
+    a.href = url;
+    a.download = `delivery-log-${stamp}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    setActionToast("✓ CSVを保存しました");
+    setTimeout(() => setActionToast(null), 1600);
+  };
+
+  const timeInputValue = (ts) => {
+    if (!ts) return "";
+    const d = new Date(ts);
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  };
+  const logTimeToTs = (dateStr, value) => {
+    if (!dateStr || !/^\d{2}:\d{2}$/.test(value || "")) return null;
+    const [h, m] = value.split(":").map(Number);
+    if (h < 0 || h > 23 || m < 0 || m > 59) return null;
+    const d = new Date(`${dateStr}T00:00:00`);
+    d.setHours(h, m, 0, 0);
+    return d.getTime();
+  };
+  const canEditWorkTimes = (dateStr) => {
+    if (!dateStr) return false;
+    const d = new Date(`${dateStr}T00:00:00`);
+    d.setDate(d.getDate() + 2);
+    return Date.now() < d.getTime();
+  };
+  const calcSessionMs = (log, refNow = now) => {
+    const closed = (log.sessions || []).reduce((s, x) => s + (x.start ? Math.max(0, (x.end || refNow) - x.start) : 0), 0);
+    return closed + (log.currentSessionStart ? Math.max(0, refNow - log.currentSessionStart) : 0);
+  };
+  const calcBreakMs = (log, refNow = now) => {
+    const closed = (log.breaks || []).reduce((s, b) => s + (b.start ? Math.max(0, (b.end || refNow) - b.start) : 0), 0);
+    return closed + (log.currentBreakStart ? Math.max(0, refNow - log.currentBreakStart) : 0);
+  };
+  const sessionBounds = (log) => {
+    const entries = [
+      ...(log.sessions || []).filter(s => s.start).map(s => ({ start: s.start, end: s.end || null })),
+      ...(log.currentSessionStart ? [{ start: log.currentSessionStart, end: null }] : []),
+    ];
+    if (entries.length === 0) return { start: null, end: null, active: false };
+    const starts = entries.map(s => s.start);
+    const ends = entries.map(s => s.end).filter(Boolean);
+    const active = !!log.currentSessionStart;
+    return { start: Math.min(...starts), end: active ? null : (ends.length ? Math.max(...ends) : null), active };
+  };
+  const applyWorkTimesToLog = (log, startTs, endTs) => {
+    const next = {
+      ...log,
+      sessions: [...(log.sessions || [])],
+      breaks: [...(log.breaks || [])],
+      deliveries: [...(log.deliveries || [])],
+      dailyIncentives: [...(log.dailyIncentives || [])],
+      jizoSessions: [...(log.jizoSessions || [])],
+      weatherSamples: [...(log.weatherSamples || [])],
+    };
+    const sessions = next.sessions.filter(s => s.start && s.end && s.end > s.start).map(s => ({ ...s }));
+    if (next.currentSessionStart && endTs) sessions.push({ start: next.currentSessionStart, end: endTs });
+    if (sessions.length === 0) {
+      if (endTs) {
+        next.sessions = [{ start: startTs, end: endTs }];
+        next.currentSessionStart = null;
+      } else {
+        next.sessions = [];
+        next.currentSessionStart = startTs;
+      }
+      return next;
+    }
+    let firstIdx = 0;
+    let lastIdx = 0;
+    sessions.forEach((s, i) => {
+      if (s.start < sessions[firstIdx].start) firstIdx = i;
+      if ((s.end || 0) > (sessions[lastIdx].end || 0)) lastIdx = i;
+    });
+    sessions[firstIdx] = { ...sessions[firstIdx], start: startTs };
+    if (endTs) {
+      sessions[lastIdx] = { ...sessions[lastIdx], end: endTs };
+      next.currentSessionStart = null;
+    }
+    next.sessions = sessions.filter(s => s.start && s.end && s.end > s.start).sort((a, b) => a.start - b.start);
+    if (!endTs) next.currentSessionStart = next.currentSessionStart || startTs;
+    return next;
+  };
+  const openHistWorkEdit = (log) => {
+    const b = sessionBounds(log);
+    setHistWorkEdit({
+      date: log.date,
+      start: timeInputValue(b.start),
+      end: b.active ? "" : timeInputValue(b.end),
+      error: null,
+    });
+  };
+  const saveHistWorkEdit = async () => {
+    if (!histWorkEdit) return;
+    const startTs = logTimeToTs(histWorkEdit.date, histWorkEdit.start);
+    const endTs = histWorkEdit.end ? logTimeToTs(histWorkEdit.date, histWorkEdit.end) : null;
+    const isToday = histWorkEdit.date === tds();
+    const target = isToday ? data : allLogs.find(l => l.date === histWorkEdit.date);
+    if (!target) {
+      setHistWorkEdit(e => ({ ...e, error: "対象日のデータが見つかりません" }));
+      return;
+    }
+    if (!canEditWorkTimes(histWorkEdit.date)) {
+      setHistWorkEdit(e => ({ ...e, error: "修正期限を過ぎています" }));
+      return;
+    }
+    if (!startTs) {
+      setHistWorkEdit(e => ({ ...e, error: "オンライン時刻を入力してください" }));
+      return;
+    }
+    if (!endTs && !target.currentSessionStart) {
+      setHistWorkEdit(e => ({ ...e, error: "オフライン時刻を入力してください" }));
+      return;
+    }
+    if (endTs && endTs <= startTs) {
+      setHistWorkEdit(e => ({ ...e, error: "オフライン時刻はオンライン時刻より後にしてください" }));
+      return;
+    }
+    if (isToday) {
+      setData(prev => applyWorkTimesToLog(prev, startTs, endTs));
+    } else {
+      const next = applyWorkTimesToLog(target, startTs, endTs);
+      await svByDate(histWorkEdit.date, next);
+      setAllLogs(prev => prev.map(l => l.date === histWorkEdit.date ? next : l));
+    }
+    setHistWorkEdit(null);
+    setActionToast("✓ 稼働時間を保存しました");
+    setTimeout(() => setActionToast(null), 1400);
+  };
+  const saveHistDeliveryDetail = async () => {
+    if (!histDetail || histDetail.delIdx == null) return;
+    const nextDelivery = { ...histDetail.delivery };
+    const isToday = histDetail.date === tds();
+    if (isToday) {
+      update(dd => {
+        if (dd.deliveries[histDetail.delIdx]) dd.deliveries[histDetail.delIdx] = nextDelivery;
+      });
+    } else {
+      const log = allLogs.find(l => l.date === histDetail.date);
+      if (!log) return;
+      const nextLog = { ...log, deliveries: [...(log.deliveries || [])] };
+      nextLog.deliveries[histDetail.delIdx] = nextDelivery;
+      await svByDate(histDetail.date, nextLog);
+      setAllLogs(prev => prev.map(l => l.date === histDetail.date ? nextLog : l));
+    }
+    setHistDetail(prev => ({ ...prev, saved: true }));
+    setTimeout(() => setHistDetail(prev => prev ? ({ ...prev, saved: false }) : null), 1500);
+  };
+  const saveHistIncEdit = async () => {
+    if (!histIncEdit) return;
+    if (!canEditWorkTimes(histIncEdit.date)) {
+      setHistIncEdit(e => ({ ...e, error: "修正期限を過ぎています" }));
+      return;
+    }
+    const amount = parseInt(histIncEdit.amount, 10) || 0;
+    if (!histIncEdit.company || amount <= 0) {
+      setHistIncEdit(e => ({ ...e, error: "会社と金額を入力してください" }));
+      return;
+    }
+    const apply = (log) => {
+      const next = { ...log, dailyIncentives: [...(log.dailyIncentives || [])] };
+      const row = { company: histIncEdit.company, amount, time: histIncEdit.time || Date.now() };
+      if (histIncEdit.index == null) next.dailyIncentives.push(row);
+      else next.dailyIncentives[histIncEdit.index] = { ...(next.dailyIncentives[histIncEdit.index] || {}), ...row };
+      return next;
+    };
+    if (histIncEdit.date === tds()) {
+      setData(prev => apply(prev));
+    } else {
+      const log = allLogs.find(l => l.date === histIncEdit.date);
+      if (!log) return;
+      const next = apply(log);
+      await svByDate(histIncEdit.date, next);
+      setAllLogs(prev => prev.map(l => l.date === histIncEdit.date ? next : l));
+    }
+    setHistIncEdit(null);
+    setActionToast("✓ インセンティブを保存しました");
+    setTimeout(() => setActionToast(null), 1400);
+  };
+  const deleteHistIncEdit = async () => {
+    if (!histIncEdit || histIncEdit.index == null || !canEditWorkTimes(histIncEdit.date)) return;
+    const apply = (log) => {
+      const next = { ...log, dailyIncentives: [...(log.dailyIncentives || [])] };
+      next.dailyIncentives.splice(histIncEdit.index, 1);
+      return next;
+    };
+    if (histIncEdit.date === tds()) {
+      setData(prev => apply(prev));
+    } else {
+      const log = allLogs.find(l => l.date === histIncEdit.date);
+      if (!log) return;
+      const next = apply(log);
+      await svByDate(histIncEdit.date, next);
+      setAllLogs(prev => prev.map(l => l.date === histIncEdit.date ? next : l));
+    }
+    setHistIncEdit(null);
+    setActionToast("✓ インセンティブを削除しました");
+    setTimeout(() => setActionToast(null), 1400);
+  };
 
   // ─── Daily target for guide ───
   const dailyTarget = goal > 0 ? (() => {
@@ -750,33 +1328,31 @@ export default function App() {
 
   // ─── 3. Today's pace prediction ───
   const pacePredict = (() => {
-    if (!isOn || wkMs < 1800000) return null; // need at least 30min of work
-    const hrWorked = wkMs / 3600000;
-    // Predict end time from past session data
+    if (!isOn || sesMs < 1800000 || !data.currentSessionStart) return null; // need at least 30min online
+    const hrWorked = sesMs / 3600000;
+    // Predict end time from average online duration, not past clock-out time.
     const today = new Date();
     const todayDow = today.getDay();
-    const pastEndTimes = [];
+    const pastDurations = [];
     allLogs.forEach(l => {
       if (!l.sessions || l.sessions.length === 0) return;
-      const lastSes = l.sessions[l.sessions.length - 1];
-      if (!lastSes.end) return;
-      const endDate = new Date(lastSes.end);
-      const endMinutes = endDate.getHours() * 60 + endDate.getMinutes();
-      const dow = endDate.getDay();
-      const daysAgo = Math.max(1, Math.round((today - endDate) / 86400000));
+      const total = l.sessions.reduce((s, x) => s + (x.start && x.end ? Math.max(0, x.end - x.start) : 0), 0);
+      if (total < 1800000) return;
+      const dayDate = new Date((l.date || toLD(l.sessions[0].start)) + "T00:00:00");
+      const dow = dayDate.getDay();
+      const daysAgo = Math.max(1, Math.round((today - dayDate) / 86400000));
       const weight = (dow === todayDow ? 2 : 1) / daysAgo;
-      pastEndTimes.push({ minutes: endMinutes, weight });
+      pastDurations.push({ ms: total, weight });
     });
-    if (pastEndTimes.length < 3) return null; // not enough data to predict
-    const totalWeight = pastEndTimes.reduce((s, e) => s + e.weight, 0);
-    const avgEndMinutes = Math.round(pastEndTimes.reduce((s, e) => s + e.minutes * e.weight, 0) / totalWeight);
-    const nowMinutes = today.getHours() * 60 + today.getMinutes();
-    const remainMin = Math.max(0, avgEndMinutes - nowMinutes);
-    const remainH = remainMin / 60;
+    if (pastDurations.length < 3) return null; // not enough data to predict
+    const totalWeight = pastDurations.reduce((s, e) => s + e.weight, 0);
+    const avgDurationMs = Math.round(pastDurations.reduce((s, e) => s + e.ms * e.weight, 0) / totalWeight);
+    const predictedEndTs = data.currentSessionStart + avgDurationMs;
+    const remainH = Math.max(0, predictedEndTs - Date.now()) / 3600000;
     const pace = totRew / hrWorked;
     const predicted = Math.round(totRew + pace * remainH);
     const pctOfGoal = dailyTarget > 0 ? Math.round(predicted / dailyTarget * 100) : 0;
-    return { predicted, pace: Math.round(pace), pctOfGoal };
+    return { predicted, pace: Math.round(pace), pctOfGoal, endLabel: ft(predictedEndTs), avgDuration: avgDurationMs };
   })();
 
   // ─── 4. Personal bests ───
@@ -861,7 +1437,7 @@ export default function App() {
   const doOnline = () => {
     if (isOn) return;
     if (!data.weather) { setWeatherPop(true); return; }
-    update(d => { d.currentSessionStart = Date.now(); });
+    update(d => { const ts = Date.now(); d.currentSessionStart = ts; d.currentLastActivityAt = ts; });
     pulse("online");
     // Show weather chance then today's guide
     if (weatherChanceMsg) {
@@ -905,7 +1481,7 @@ export default function App() {
         const isNewBest = endAll > pastBest && pastBest > 0;
 
         update(d => {
-          d.sessions.push({ start: d.currentSessionStart, end: Date.now() }); d.currentSessionStart = null;
+          d.sessions.push({ start: d.currentSessionStart, end: Date.now() }); d.currentSessionStart = null; d.currentLastActivityAt = null;
           if (d.currentJizoStart) { d.jizoSessions.push({ start: d.currentJizoStart, end: Date.now() }); d.currentJizoStart = null; }
           if (d.currentBreakStart) { d.breaks.push({ start: d.currentBreakStart, end: Date.now() }); d.currentBreakStart = null; }
         });
@@ -914,9 +1490,10 @@ export default function App() {
         // Count efficiency rule hits for today
         const efDels = data.deliveries.filter(d2 => !d2.cancelled && d2.orderTime && d2.completeTime).map(d2 => {
           const dur = (d2.completeTime - d2.orderTime) / 60000;
-          return { ...d2, perMin: dur > 0 ? (d2.reward || 0) / dur : 0 };
-        });
-        const efAvg = efDels.length > 0 ? efDels.reduce((s, d2) => s + d2.perMin, 0) / efDels.length : 0;
+          return { ...d2, perMin: dur > 0 ? (d2.reward || 0) / dur : 0, durMin: dur };
+        }).filter(d2 => d2.durMin >= 3 && !(d2.company !== "pickgo" && d2.perMin >= 100));
+        const efPMs = efDels.map(d2 => d2.perMin);
+        const efAvg = efPMs.length > 0 ? (() => { const s = [...efPMs].sort((a, b) => a - b); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : (s[m-1] + s[m]) / 2; })() : 0;
         const efLowCount = efAvg > 0 ? efDels.filter(d2 => d2.perMin < efAvg * 0.85).length : 0;
         setOtsukareData({ delCnt: endDelCnt, revenue: endRew, incentive: endInc, total: endAll, hrBase: endHrBase, hrAll: endHrAll, workTime: endWkMs, isNewBest, streak: streak, efLowCount });
       }
@@ -943,9 +1520,98 @@ export default function App() {
     if (isJz) update(d => { d.jizoSessions.push({ start: d.currentJizoStart, end: Date.now() }); d.currentJizoStart = null; });
     else update(d => { d.currentJizoStart = Date.now(); });
   };
-  const doOrd = () => { if (!isOn || isBrk || hasOrd) return; if (isJz) update(d => { d.jizoSessions.push({ start: d.currentJizoStart, end: Date.now() }); d.currentJizoStart = null; }); update(d => { d.currentOrderTime = Date.now(); }); getPos().then(p => { if (p) { update(d => { d.currentOrderPos = p; }); fetchWeather(p.lat, p.lng).then(w => { if (w) update(d => { d.currentOrderWeather = w; }); }); } }); pulse("order"); };
-  const doCmp = () => { if (!hasOrd) return; setRwCo(null); setRwAmt(""); setRwInc(""); setRwField("reward"); setRwType("single"); setRwRating(null); setScreen("reward"); pulse("complete"); };
+  const doOrd = () => {
+    if (!isOn || isBrk || hasOrd) return;
+    if (isJz) update(d => { d.jizoSessions.push({ start: d.currentJizoStart, end: Date.now() }); d.currentJizoStart = null; });
+    update(d => {
+      d.currentOrderTime = Date.now();
+      d.currentOrderPos = null; d.currentOrderWeather = null;
+      d.currentStoreArrivalTime = null; d.currentStoreDepartTime = null; d.currentStorePos = null; d.currentStoreWeather = null;
+    });
+    getPos().then(p => { if (p) { update(d => { d.currentOrderPos = p; }); fetchWeather(p.lat, p.lng).then(w => { if (w) update(d => { d.currentOrderWeather = w; d.weatherSamples.push(makeWeatherSample("order", p, w)); }); }); } });
+    pulse("order");
+  };
+  const doStoreArrive = () => {
+    if (!hasOrd || hasStoreArrived) return;
+    update(d => { d.currentStoreArrivalTime = Date.now(); });
+    getPos().then(p => {
+      if (p) {
+        update(d => { d.currentStorePos = p; });
+        fetchWeather(p.lat, p.lng).then(w => { if (w) update(d => { d.currentStoreWeather = w; d.weatherSamples.push(makeWeatherSample("store", p, w)); }); });
+      }
+    });
+    pulse("storeArrive");
+  };
+  const doStoreDepart = () => {
+    if (!hasOrd || !hasStoreArrived || hasStoreDeparted) return;
+    update(d => { d.currentStoreDepartTime = Date.now(); });
+    if (!data.currentStorePos) {
+      getPos().then(p => { if (p) { update(d => { d.currentStorePos = p; }); fetchWeather(p.lat, p.lng).then(w => { if (w) update(d => { d.currentStoreWeather = w; d.weatherSamples.push(makeWeatherSample("store_depart", p, w)); }); }); } });
+    }
+    pulse("storeDepart");
+  };
+  const doCmp = () => {
+    if (!hasOrd) return;
+    if (!hasStoreDeparted) {
+      setPopup({ msg: "店舗出発を記録してから\n配達完了に進んでください。", onConfirm: () => setPopup(null) });
+      return;
+    }
+    setRwCo(null); setRwAmt(""); setRwInc(""); setRwField("reward"); setRwType("single"); setRwRating(null); setScreen("reward"); pulse("complete");
+  };
   const [rwSaving, setRwSaving] = useState(false);
+  const openCancel = (type) => {
+    if (!hasOrd) return;
+    setCancelType(type);
+    setRwCo(null);
+    setScreen("cancel");
+  };
+  const doCancelOk = async () => {
+    if (!rwCo || !cancelType || rwSaving) return;
+    setRwSaving(true);
+    try {
+      const endPos = await getPos();
+      const nowCancel = Date.now();
+      const sp = data.currentOrderPos || null;
+      const storePos = data.currentStorePos || (cancelType === "store_wait" ? endPos : null);
+      const orderDate = data.currentOrderTime ? toLD(data.currentOrderTime) : tds();
+      const isCrossDay = orderDate !== data.date;
+      const deliveryObj = {
+        orderTime: data.currentOrderTime, completeTime: nowCancel, company: rwCo,
+        reward: 0, incentive: 0, orderType: "single", cancelled: true, cancelType, rating: null,
+        storeArrivalTime: cancelType === "store_wait" ? data.currentStoreArrivalTime : null,
+        storeDepartTime: null,
+        startLat: sp?.lat || null, startLng: sp?.lng || null,
+        storeLat: storePos?.lat || null, storeLng: storePos?.lng || null,
+        endLat: endPos?.lat || null, endLng: endPos?.lng || null,
+        apiWeather: data.currentOrderWeather || null,
+        storeWeather: data.currentStoreWeather || null,
+        areaName: null, memo: "",
+      };
+      if (isCrossDay) {
+        const prevLog = allLogs.find(l => l.date === orderDate);
+        if (prevLog) {
+          prevLog.deliveries.push(deliveryObj);
+          svByDate(orderDate, prevLog);
+          setAllLogs(prev => prev.map(l => l.date === orderDate ? { ...prevLog } : l));
+        }
+        update(d => {
+          d.currentOrderTime = null; d.currentOrderPos = null; d.currentOrderWeather = null;
+          d.currentStoreArrivalTime = null; d.currentStoreDepartTime = null; d.currentStorePos = null; d.currentStoreWeather = null;
+        });
+      } else {
+        update(d => {
+          d.deliveries.push(deliveryObj);
+          d.currentOrderTime = null; d.currentOrderPos = null; d.currentOrderWeather = null;
+          d.currentStoreArrivalTime = null; d.currentStoreDepartTime = null; d.currentStorePos = null; d.currentStoreWeather = null;
+        });
+      }
+      setScreen("main");
+      pulse("cancel");
+    } finally {
+      setRwSaving(false);
+      setCancelType(null);
+    }
+  };
   const doRwOk = async () => {
     if (!rwCo || !rwAmt || rwSaving) return;
     setRwSaving(true);
@@ -953,8 +1619,10 @@ export default function App() {
     const inc = parseInt(rwInc, 10) || 0;
     // PickGo fee deduction
     const isPickgo = rwCo === "pickgo";
+    const isRocket = rwCo === "rocket";
     const feeRate = isPickgo ? (settings.pickgoFeeRate || 15) : 0;
-    const rew = isPickgo ? Math.round(rawRew * (1 - feeRate / 100)) : rawRew;
+    const rocketBonusRate = isRocket ? (settings.rocketBonusRate || 0) : 0;
+    const rew = isPickgo ? Math.round(rawRew * (1 - feeRate / 100)) : isRocket ? Math.round(rawRew * (1 + rocketBonusRate / 100)) : rawRew;
     // Auto-rating: compare reward to rolling average
     const avgUnit = delCnt > 0 ? Math.round(totRew / delCnt) : 500;
     let autoRating = "normal";
@@ -966,11 +1634,15 @@ export default function App() {
     const isCrossDay = orderDate !== data.date;
     const deliveryObj = {
       orderTime: data.currentOrderTime, completeTime: Date.now(), company: rwCo,
-      reward: rew, rawReward: isPickgo ? rawRew : undefined, incentive: inc, orderType: rwType, cancelled: false,
+      reward: rew, rawReward: isPickgo || (isRocket && rocketBonusRate > 0) ? rawRew : undefined, rocketBonusRate: isRocket ? rocketBonusRate : 0, incentive: inc, orderType: rwType, cancelled: false,
       rating: finalRating,
+      storeArrivalTime: data.currentStoreArrivalTime || null,
+      storeDepartTime: data.currentStoreDepartTime || null,
       startLat: data.currentOrderPos?.lat || null, startLng: data.currentOrderPos?.lng || null,
+      storeLat: data.currentStorePos?.lat || null, storeLng: data.currentStorePos?.lng || null,
       endLat: endPos?.lat || null, endLng: endPos?.lng || null,
       apiWeather: data.currentOrderWeather || null,
+      storeWeather: data.currentStoreWeather || null,
       areaName: null,
     };
     if (isCrossDay) {
@@ -981,13 +1653,20 @@ export default function App() {
         svByDate(orderDate, prevLog);
         setAllLogs(prev => prev.map(l => l.date === orderDate ? { ...prevLog } : l));
       }
-      update(d => { d.currentOrderTime = null; d.currentOrderPos = null; d.currentOrderWeather = null; });
+      update(d => {
+        d.currentOrderTime = null; d.currentOrderPos = null; d.currentOrderWeather = null;
+        d.currentStoreArrivalTime = null; d.currentStoreDepartTime = null; d.currentStorePos = null; d.currentStoreWeather = null;
+      });
     } else {
       update(d => {
         d.deliveries.push(deliveryObj);
         d.currentOrderTime = null;
         d.currentOrderPos = null;
         d.currentOrderWeather = null;
+        d.currentStoreArrivalTime = null;
+        d.currentStoreDepartTime = null;
+        d.currentStorePos = null;
+        d.currentStoreWeather = null;
       });
     }
     // Background geocode for area name
@@ -1052,13 +1731,12 @@ export default function App() {
     }
     if (ms2) setTimeout(() => setMilestone(ms2), 600); // delay to let screen transition
   };
-  const doCkCan = () => { if (!rwCo) { setPopup({ msg: "会社を選択してください", onConfirm: () => setPopup(null) }); return; } setPopup({ msg: "調理待ちキャンセルとして記録？", onConfirm: async () => { const endPos = await getPos(); update(d => { const sp = d.currentOrderPos || null; const aw = d.currentOrderWeather || null; d.deliveries.push({ orderTime: d.currentOrderTime, completeTime: Date.now(), company: rwCo, reward: 0, incentive: 0, orderType: "single", cancelled: true, rating: null, startLat: sp?.lat || null, startLng: sp?.lng || null, endLat: endPos?.lat || null, endLng: endPos?.lng || null, apiWeather: aw }); d.currentOrderTime = null; d.currentOrderPos = null; d.currentOrderWeather = null; }); setPopup(null); setScreen("main"); } }); };
   const npF = (k, s) => { if (k === "⌫") s(p => p.slice(0, -1)); else s(p => (p + k).length > 7 ? p : p + k); };
   const openDI = () => { setDiCo(null); setDiAmt(""); setScreen("di"); };
   const doDIOk = () => { if (!diCo || !diAmt) return; update(d => { d.dailyIncentives.push({ company: diCo, amount: parseInt(diAmt, 10) || 0, time: Date.now() }); }); setScreen("main"); };
   const doReset = () => { setMenu(false); setPopup({ msg: "本日のデータをリセットしますか？", onConfirm: () => { setData(newDay()); setPopup(null); } }); };
   const wSel = (w) => {
-    update(d => { d.weather = w; d.currentSessionStart = Date.now(); });
+    update(d => { const ts = Date.now(); d.weather = w; d.currentSessionStart = ts; d.currentLastActivityAt = ts; });
     setWeatherPop(false);
     pulse("online");
     // Weather chance for the selected weather
@@ -1092,7 +1770,13 @@ export default function App() {
   const delEdit = () => { setPopup({ msg: "この記録を削除？", onConfirm: () => { update(d => { d.deliveries.splice(editIdx, 1); }); setPopup(null); setScreen("main"); } }); };
   const doGoalSave = () => { const a = parseInt(goalInput, 10) || 0; setGoal(a); sg({ amount: a, month: ms() }); setGoalModal(false); };
 
-  if (loading) return <div style={{ fontFamily: FN, background: T.bg, color: T.textDim, height: "100dvh", display: "flex", alignItems: "center", justifyContent: "center" }}>読み込み中...</div>;
+  if (loading) return (
+    <div style={{ fontFamily: FN, background: T.bg, color: T.text, height: "100dvh", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16 }}>
+      <div style={{ width: 36, height: 36, border: `3px solid ${T.borderLight}`, borderTop: `3px solid ${T.accent}`, borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+      <div style={{ fontSize: 15, fontWeight: 600, color: T.textSub }}>データ準備中...</div>
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+    </div>
+  );
 
   // ─── Shared ───
   const ov = { position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: T.overlay, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "flex-start", zIndex: 100, paddingTop: 14, overflowY: "auto", fontFamily: FN, color: T.text };
@@ -1110,7 +1794,7 @@ export default function App() {
         <div style={{ fontSize: sz(14), fontWeight: 600, marginBottom: 16, color: T.text, whiteSpace: "pre-line", lineHeight: 1.6 }}>{popup.msg}</div>
         <div style={{ display: "flex", gap: 8 }}>
           <button style={{ flex: 1, height: 44, borderRadius: 9, border: `1px solid ${T.borderLight}`, background: T.inputBg, color: T.textSub, fontSize: sz(14), cursor: "pointer", fontFamily: FN }} onClick={() => setPopup(null)}>いいえ</button>
-          <button style={{ flex: 1, height: 44, borderRadius: 9, border: "none", background: T.accent, color: "#000", fontSize: sz(14), fontWeight: 700, cursor: "pointer", fontFamily: FN }} onClick={popup.onConfirm}>はい</button>
+          <button style={{ flex: 1, height: 44, borderRadius: 9, border: "none", background: rwSaving ? T.borderLight : T.accent, color: "#000", fontSize: sz(14), fontWeight: 700, cursor: rwSaving ? "default" : "pointer", fontFamily: FN, opacity: rwSaving ? 0.6 : 1 }} onClick={popup.onConfirm} disabled={rwSaving}>{rwSaving ? "保存中..." : "はい"}</button>
         </div>
       </div>
     </div>
@@ -1147,10 +1831,13 @@ export default function App() {
   // ─── Menu overlay ───
   const anaItems = [
     { key: "daily", label: "📋 デイリーレポート", free: true },
+    { key: "sales", label: "💴 売上集計", free: true },
     { key: "efficiency", label: "🎯 効率化ポイント", free: true },
     { key: "heatmap", label: "📍 注文ヒートマップ", free: true },
+    { key: "storewait", label: "🏪 店舗待機マップ", free: true },
     { key: "highvalue", label: "💎 高単価配達マップ", free: true },
     { key: "hourly", label: "⏰ 時間帯分析", free: true },
+    { key: "hourwage", label: "🧭 曜日×時間 時給表", free: false },
     { key: "area", label: "🗺️ エリア別分析", free: false },
     { key: "condition", label: "🌡️ 気象コンディション分析", free: false },
     { key: "weekday", label: "📅 曜日分析", free: true },
@@ -1190,7 +1877,7 @@ export default function App() {
     { title: "ようこそ！", desc: "配達ログは、配達の稼働状況を\n記録・分析するアプリです。\n\n簡単な操作で毎日の記録を残せます。" },
     { title: "① 天候を選ぶ", desc: "まず今日の天候を選びます。\n天候別の売上分析に使われます。" },
     { title: "② オンラインを押す", desc: "配達アプリをオンにしたら\nこのボタンを押します。\n稼働時間の記録が始まります。" },
-    { title: "③ 受注 → 配達完了", desc: "注文が入ったら「受注」を押します。\n配達が終わったら「配達完了」を押して\n報酬を入力します。" },
+    { title: "③ 受注 → 店舗 → 配達完了", desc: "注文が入ったら「受注」を押します。\n店舗到着・店舗出発を記録してから\n配達完了で報酬を入力します。" },
     { title: "④ 分析を見る", desc: "右上の ☰ メニューから「分析」で\n時給・会社別・時間帯別の\n成績が確認できます。" },
   ];
   const TutorialEl = tutorial && (
@@ -1239,6 +1926,11 @@ export default function App() {
         ))}
       </div>
       <div style={{ fontSize: sz(36), fontWeight: 800, color: rwField === "incentive" ? T.purple : T.text, textAlign: "center", marginBottom: 2, minHeight: 42 }}>{av ? `¥${Number(av).toLocaleString()}` : <span style={{ color: T.textFaint }}>例：650</span>}</div>
+      {rwCo === "rocket" && rwAmt && (settings.rocketBonusRate || 0) > 0 && (
+        <div style={{ fontSize: sz(11), color: T.textMuted, marginBottom: 6 }}>
+          Rocket Now +{settings.rocketBonusRate}% → <span style={{ color: T.accent, fontWeight: 800 }}>¥{Math.round((parseInt(rwAmt, 10) || 0) * (1 + (settings.rocketBonusRate || 0) / 100)).toLocaleString()}</span>
+        </div>
+      )}
       <div style={{ display: "flex", gap: 20, marginBottom: 8 }}>
         <div style={{ textAlign: "center" }}><div style={{ fontSize: sz(9), color: T.textDim }}>報酬</div><div style={{ fontSize: sz(14), fontWeight: 700, color: rwAmt ? T.text : T.textFaint }}>¥{rwAmt ? Number(rwAmt).toLocaleString() : "0"}</div></div>
         <div style={{ textAlign: "center" }}><div style={{ fontSize: sz(9), color: T.textDim }}>インセンティブ</div><div style={{ fontSize: sz(14), fontWeight: 700, color: rwInc ? T.purple : T.textFaint }}>¥{rwInc ? Number(rwInc).toLocaleString() : "0"}</div></div>
@@ -1287,9 +1979,31 @@ export default function App() {
 
       <div style={{ width: "100%", maxWidth: 320, padding: "0 10px" }}>
         <button style={{ ...okBt(!rwCo || !rwAmt || rwSaving), maxWidth: "100%", height: 52, fontSize: sz(17) }} onClick={doRwOk} disabled={!rwCo || !rwAmt || rwSaving}>{rwSaving ? "保存中..." : "OK"}</button>
-        <button onClick={doCkCan} style={{ width: "100%", height: 44, borderRadius: 10, border: "1.5px solid #EF444444", background: T.card, color: "#EF4444", fontSize: sz(14), fontWeight: 600, cursor: "pointer", fontFamily: FN, marginTop: 6 }}>調理待ちキャンセル</button>
         <button onClick={() => setScreen("main")} style={{ width: "100%", height: 40, borderRadius: 10, border: `1.5px solid ${T.borderLight}`, background: "none", color: T.textMuted, fontSize: sz(14), fontWeight: 600, cursor: "pointer", fontFamily: FN, marginTop: 4 }}>戻る</button>
       </div>
+    </div>);
+  }
+
+  // ═══ CANCEL ORDER ═══
+  if (screen === "cancel") {
+    const isStoreWaitCancel = cancelType === "store_wait";
+    const title = isStoreWaitCancel ? "調理待ちキャンセル" : "店舗未到着キャンセル";
+    const desc = isStoreWaitCancel
+      ? "店舗到着後のキャンセルとして記録します。店舗待機マップの対象になります。"
+      : "店舗に着く前のキャンセルとして記録します。店舗待機マップには載せません。";
+    return (<div style={ov}>
+      <div style={{ fontSize: sz(14), color: isStoreWaitCancel ? "#EF4444" : T.textMuted, marginBottom: 6, letterSpacing: 2, fontWeight: 700 }}>{title}</div>
+      <div style={{ fontSize: sz(12), color: T.textMuted, lineHeight: 1.6, textAlign: "center", maxWidth: 320, marginBottom: 16, padding: "0 14px" }}>{desc}</div>
+      <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>{COS.map(c => <button key={c.id} style={cB(c.bg, rwCo === c.id)} onClick={() => setRwCo(c.id)}>{c.letter}</button>)}</div>
+      <div style={{ fontSize: sz(11), color: T.textMuted, marginBottom: 18, height: 14 }}>{rwCo ? COS.find(c => c.id === rwCo)?.name : "会社を選択"}</div>
+      {isStoreWaitCancel && data.currentStoreArrivalTime && (
+        <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: "12px 16px", width: "100%", maxWidth: 300, marginBottom: 16, textAlign: "center" }}>
+          <div style={{ fontSize: sz(10), color: T.textDim, marginBottom: 4 }}>店舗待機時間</div>
+          <div style={{ fontSize: sz(22), fontWeight: 800, color: "#EF4444" }}>{fm(Date.now() - data.currentStoreArrivalTime)}</div>
+        </div>
+      )}
+      <button style={okBt(!rwCo || rwSaving)} onClick={doCancelOk} disabled={!rwCo || rwSaving}>{rwSaving ? "保存中..." : "キャンセルを記録"}</button>
+      <button style={canB} onClick={() => { setCancelType(null); setScreen("main"); }}>戻る</button>
     </div>);
   }
 
@@ -1335,12 +2049,14 @@ export default function App() {
               <span onClick={() => setEditField("orderTime")} style={{ fontSize: sz(14), fontWeight: 600, color: T.text, cursor: "pointer" }}>{ft(editData.orderTime)}〜{ft(editData.completeTime)} ✎</span>
             )}
           </div>
-          {(() => { const dur = editData.completeTime && editData.orderTime ? editData.completeTime - editData.orderTime : 0; const durMin = dur > 0 ? dur / 60000 : 0; const perMin = durMin > 0 ? Math.round((editData.reward || 0) / durMin) : 0; return (<>
+          {(() => { const dur = editData.completeTime && editData.orderTime ? editData.completeTime - editData.orderTime : 0; const wait = editData.storeArrivalTime ? (editData.storeDepartTime || editData.completeTime || Date.now()) - editData.storeArrivalTime : 0; const durMin = dur > 0 ? dur / 60000 : 0; const perMin = durMin > 0 ? Math.round((editData.reward || 0) / durMin) : 0; return (<>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>所要時間</span><span style={{ fontSize: sz(14), fontWeight: 600, color: T.text }}>{fm(dur)}</span></div>
+            {wait > 0 && <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>店舗待機</span><span style={{ fontSize: sz(14), fontWeight: 600, color: wait >= 300000 || editData.cancelType === "store_wait" ? "#EF4444" : T.text }}>{fm(wait)}</span></div>}
             {perMin > 0 && !editData.cancelled && <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>分給</span><span style={{ fontSize: sz(15), fontWeight: 700, color: "#0EA5E9" }}>¥{perMin.toLocaleString()}/分</span></div>}
           </>); })()}
           <div onClick={() => setEditField("reward")} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}`, cursor: "pointer" }}><span style={{ fontSize: sz(13), color: T.textMuted }}>配達報酬</span><span style={{ fontSize: sz(17), fontWeight: 700, color: T.accent }}>¥{(editData.reward || 0).toLocaleString()} ✎</span></div>
-          {editData.rawReward && <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0 7px" }}><span style={{ fontSize: sz(11), color: T.textDim }}>PickGo 入力金額</span><span style={{ fontSize: sz(13), color: T.textMuted }}>¥{editData.rawReward.toLocaleString()}（手数料{Math.round((1 - editData.reward / editData.rawReward) * 100)}%引き）</span></div>}
+          {editData.rawReward && editData.company === "pickgo" && <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0 7px" }}><span style={{ fontSize: sz(11), color: T.textDim }}>PickGo 入力金額</span><span style={{ fontSize: sz(13), color: T.textMuted }}>¥{editData.rawReward.toLocaleString()}（手数料{Math.round((1 - editData.reward / editData.rawReward) * 100)}%引き）</span></div>}
+          {editData.rawReward && editData.company === "rocket" && editData.rocketBonusRate > 0 && <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0 7px" }}><span style={{ fontSize: sz(11), color: T.textDim }}>Rocket Now 基本金額</span><span style={{ fontSize: sz(13), color: T.textMuted }}>¥{editData.rawReward.toLocaleString()}（+{editData.rocketBonusRate}%反映）</span></div>}
           <div onClick={() => setEditField("incentive")} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}`, cursor: "pointer" }}><span style={{ fontSize: sz(13), color: T.textMuted }}>インセンティブ</span><span style={{ fontSize: sz(17), fontWeight: 700, color: T.purple }}>¥{(editData.incentive || 0).toLocaleString()} ✎</span></div>
           <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8 }}><div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 5 }}>会社</div><div style={{ display: "flex", gap: 7 }}>{COS.map(cc => (<button key={cc.id} onClick={() => setEditData({ ...editData, company: cc.id })} style={{ width: 40, height: 40, borderRadius: 10, border: editData.company === cc.id ? `2px solid ${T.text}` : `1.5px solid ${T.borderLight}`, background: editData.company === cc.id ? T.inputBg : cc.bg, color: "#FFF", fontSize: sz(16), fontWeight: 800, cursor: "pointer", fontFamily: FN }}>{cc.letter}</button>))}</div></div>
           <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginTop: 8 }}><div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 5 }}>タイプ</div><div style={{ display: "flex", gap: 6 }}>{OT.map(ot => (<button key={ot.id} onClick={() => setEditData({ ...editData, orderType: ot.id })} style={{ flex: 1, padding: "6px 0", borderRadius: 7, border: editData.orderType === ot.id ? `2px solid ${T.accent}` : `1.5px solid ${T.borderLight}`, background: editData.orderType === ot.id ? `${T.accent}20` : T.card, color: editData.orderType === ot.id ? T.accent : T.textMuted, fontSize: sz(12), fontWeight: 600, cursor: "pointer", fontFamily: FN }}>{ot.label}</button>))}</div></div>
@@ -1455,6 +2171,40 @@ export default function App() {
             週{(settings.workDays || [1, 2, 3, 4, 5]).length}日稼働
           </div>
         </div>
+        {/* 自動オフライン設定 */}
+        <div style={{ background: T.card, borderRadius: 14, padding: "4px 18px 14px", border: `1px solid ${T.border}`, marginBottom: 16 }}>
+          <div style={{ fontSize: sz(12), color: T.textDim, fontWeight: 600, padding: "12px 0 4px", letterSpacing: 1 }}>稼働補正</div>
+          <div style={{ fontSize: sz(14), fontWeight: 600, marginBottom: 4 }}>自動オフライン</div>
+          <div style={{ fontSize: sz(11), color: T.textDim, lineHeight: 1.6, marginBottom: 10 }}>オンライン中に操作がない場合、最後の操作時刻から指定時間で稼働を終了します。受注中は記録保護のため自動終了しません。</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 6 }}>
+            {[
+              { value: 0, label: "OFF" },
+              { value: 1, label: "1時間" },
+              { value: 2, label: "2時間" },
+              { value: 3, label: "3時間" },
+            ].map(opt => {
+              const sel = (settings.autoOfflineHours || 0) === opt.value;
+              return (
+                <button key={opt.value} onClick={() => {
+                  updateSettings({ autoOfflineHours: opt.value });
+                  if (opt.value > 0 && data.currentSessionStart && !data.currentLastActivityAt) update(d => { d.currentLastActivityAt = Date.now(); });
+                }} style={{
+                  height: 38, borderRadius: 9,
+                  border: sel ? `2px solid ${T.accent}` : `1px solid ${T.borderLight}`,
+                  background: sel ? `${T.accent}20` : T.inputBg,
+                  color: sel ? T.accent : T.textMuted,
+                  fontSize: sz(12), fontWeight: sel ? 800 : 600,
+                  cursor: "pointer", fontFamily: FN,
+                }}>{opt.label}</button>
+              );
+            })}
+          </div>
+          {settings.autoOfflineHours > 0 && (
+            <div style={{ fontSize: sz(10), color: T.textMuted, marginTop: 8, lineHeight: 1.5 }}>
+              現在: 最後の操作から{settings.autoOfflineHours}時間で自動オフライン
+            </div>
+          )}
+        </div>
         {/* PickGo手数料設定 */}
         <div style={{ background: T.card, borderRadius: 14, padding: "4px 18px", border: `1px solid ${T.border}`, marginTop: 16 }}>
           <div style={{ fontSize: sz(12), color: T.textDim, fontWeight: 600, padding: "12px 0 4px", letterSpacing: 1 }}>PickGo 手数料</div>
@@ -1478,6 +2228,43 @@ export default function App() {
               );
             })}
           </div>
+        </div>
+        {/* Rocket Now追加報酬設定 */}
+        <div style={{ background: T.card, borderRadius: 14, padding: "4px 18px 14px", border: `1px solid ${T.border}`, marginTop: 16 }}>
+          <div style={{ fontSize: sz(12), color: T.textDim, fontWeight: 600, padding: "12px 0 4px", letterSpacing: 1 }}>Rocket Now 追加報酬</div>
+          <div style={{ fontSize: sz(11), color: T.textMuted, lineHeight: 1.6, marginBottom: 8 }}>配達完了時にRocket Nowを選択すると、入力金額に選択中の追加報酬率を上乗せして記録します。</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8 }}>
+            {[
+              { rate: 0, label: "追加報酬なし", sub: "0%" },
+              { rate: 10, label: "グリーン", sub: "10%" },
+              { rate: 15, label: "ブルー", sub: "15%" },
+              { rate: 20, label: "パープル", sub: "20%" },
+              { rate: 25, label: "ゴールド", sub: "25%" },
+              { rate: 30, label: "ゴールドプラス", sub: "30%" },
+            ].map(opt => {
+              const sel = (settings.rocketBonusRate || 0) === opt.rate;
+              return (
+                <button key={opt.rate} onClick={() => updateSettings({ rocketBonusRate: opt.rate })} style={{
+                  padding: "9px 6px", borderRadius: 10,
+                  border: sel ? `2px solid ${T.accent}` : `1px solid ${T.borderLight}`,
+                  background: sel ? `${T.accent}22` : T.inputBg,
+                  color: sel ? T.accent : T.textMuted,
+                  cursor: "pointer", fontFamily: FN,
+                  display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+                }}>
+                  <span style={{ fontSize: sz(12), fontWeight: 800 }}>{opt.label}</span>
+                  <span style={{ fontSize: sz(11), fontWeight: 600, color: sel ? T.accent : T.textDim }}>{opt.sub}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        {/* データ出力 */}
+        <div style={{ background: T.card, borderRadius: 14, padding: "14px 18px", border: `1px solid ${T.border}`, marginTop: 16 }}>
+          <div style={{ fontSize: sz(12), color: T.textDim, fontWeight: 600, marginBottom: 4, letterSpacing: 1 }}>データ出力</div>
+          <div style={{ fontSize: sz(14), fontWeight: 600, color: T.text, marginBottom: 4 }}>CSVテキストを保存</div>
+          <div style={{ fontSize: sz(11), color: T.textMuted, lineHeight: 1.6, marginBottom: 10 }}>配達・稼働・休憩・地蔵・インセンティブを1つのCSVにまとめます。GPS座標とメモも含まれます。</div>
+          <button onClick={downloadCsvText} style={{ width: "100%", height: 44, borderRadius: 10, border: "none", background: T.accent, color: "#000", fontSize: sz(14), fontWeight: 700, cursor: "pointer", fontFamily: FN }}>CSVをダウンロード</button>
         </div>
         <div style={{ background: T.card, borderRadius: 14, padding: "12px 18px", border: `1px solid ${T.border}`, marginTop: 16 }}>
           <div style={{ fontSize: sz(12), color: "#EF4444", fontWeight: 600, marginBottom: 6 }}>データについて</div>
@@ -1532,6 +2319,96 @@ export default function App() {
   const CHART_COLORS = ["#16A34A", "#DC2626", "#EA580C", "#2563EB"];
   const todayDate = tds();
 
+  if (anaScreen === "sales") {
+    const moveMonth = (delta) => {
+      const [y, m] = salesMonth.split("-").map(Number);
+      const d = new Date(y, m - 1 + delta, 1);
+      setSalesMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+    };
+    const salesLogs = (() => {
+      const map = new Map();
+      anaAll.forEach(l => { if (l?.date) map.set(l.date, l); });
+      return [...map.values()].filter(l => salesMode === "month" ? l.date?.startsWith(salesMonth) : l.date?.startsWith(salesYear));
+    })();
+    const rowsMap = new Map(COS.map(c => [c.id, { id: c.id, letter: c.letter, name: c.name, bg: c.bg, reward: 0, deliveryInc: 0, dailyInc: 0, total: 0, count: 0 }]));
+    salesLogs.forEach(log => {
+      (log.deliveries || []).filter(d => !d.cancelled).forEach(d => {
+        const id = d.company || "unknown";
+        if (!rowsMap.has(id)) rowsMap.set(id, { id, letter: "?", name: "不明", bg: "#6B7280", reward: 0, deliveryInc: 0, dailyInc: 0, total: 0, count: 0 });
+        const r = rowsMap.get(id);
+        r.reward += d.reward || 0;
+        r.deliveryInc += d.incentive || 0;
+        r.total += (d.reward || 0) + (d.incentive || 0);
+        r.count += dc(d);
+      });
+      (log.dailyIncentives || []).forEach(di => {
+        const id = di.company || "unknown";
+        if (!rowsMap.has(id)) rowsMap.set(id, { id, letter: "?", name: "不明", bg: "#6B7280", reward: 0, deliveryInc: 0, dailyInc: 0, total: 0, count: 0 });
+        const r = rowsMap.get(id);
+        r.dailyInc += di.amount || 0;
+        r.total += di.amount || 0;
+      });
+    });
+    const rows = [...rowsMap.values()];
+    const totalRow = rows.reduce((a, r) => ({
+      id: "all", letter: "全", name: "全社合計", bg: T.accent,
+      reward: a.reward + r.reward,
+      deliveryInc: a.deliveryInc + r.deliveryInc,
+      dailyInc: a.dailyInc + r.dailyInc,
+      total: a.total + r.total,
+      count: a.count + r.count,
+    }), { reward: 0, deliveryInc: 0, dailyInc: 0, total: 0, count: 0 });
+    const [sy, sm] = salesMonth.split("-").map(Number);
+    const lastDay = new Date(sy, sm, 0).getDate();
+    const rangeLabel = salesMode === "month" ? `${sy}/${sm}/1〜${sy}/${sm}/${lastDay}` : `${salesYear}/1/1〜${salesYear}/12/31`;
+    const activeRows = rows.sort((a, b) => b.total - a.total);
+    const rowEl = (r, isAll = false) => (
+      <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: isAll ? "12px 0" : "10px 0", borderTop: isAll ? "none" : `1px solid ${T.border}` }}>
+        <div style={{ width: isAll ? 38 : 32, height: isAll ? 38 : 32, borderRadius: 9, background: r.bg, color: r.id === "all" ? "#000" : "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: sz(isAll ? 14 : 12), fontWeight: 900, flexShrink: 0 }}>{r.letter}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+            <div style={{ fontSize: sz(isAll ? 14 : 13), fontWeight: 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.name}</div>
+            <div style={{ fontSize: sz(isAll ? 18 : 15), fontWeight: 900, color: isAll ? T.accent : T.text }}>¥{r.total.toLocaleString()}</div>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 3 }}>
+            <span style={{ fontSize: sz(10), color: T.textMuted }}>{r.count}件</span>
+            <span style={{ fontSize: sz(10), color: T.textMuted }}>配達 ¥{r.reward.toLocaleString()}</span>
+            {(r.deliveryInc + r.dailyInc) > 0 && <span style={{ fontSize: sz(10), color: T.purple }}>インセ ¥{(r.deliveryInc + r.dailyInc).toLocaleString()}</span>}
+          </div>
+        </div>
+      </div>
+    );
+    return (
+      <AnaPage title="💴 売上集計">
+        <div style={aC}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 12 }}>
+            {[{ id: "month", label: "月間" }, { id: "year", label: "年間" }].map(m => (
+              <button key={m.id} onClick={() => setSalesMode(m.id)} style={{ height: 38, borderRadius: 9, border: salesMode === m.id ? `2px solid ${T.accent}` : `1px solid ${T.borderLight}`, background: salesMode === m.id ? `${T.accent}20` : T.inputBg, color: salesMode === m.id ? T.accent : T.textMuted, fontSize: sz(13), fontWeight: 800, cursor: "pointer", fontFamily: FN }}>{m.label}</button>
+            ))}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+            <button onClick={() => salesMode === "month" ? moveMonth(-1) : setSalesYear(String(Number(salesYear) - 1))} style={{ width: 38, height: 34, borderRadius: 9, border: `1px solid ${T.borderLight}`, background: T.inputBg, color: T.text, fontSize: sz(15), fontWeight: 800, cursor: "pointer", fontFamily: FN }}>‹</button>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: sz(16), fontWeight: 900, color: T.text }}>{salesMode === "month" ? `${sy}年${sm}月` : `${salesYear}年`}</div>
+              <div style={{ fontSize: sz(10), color: T.textDim, marginTop: 2 }}>{rangeLabel}</div>
+            </div>
+            <button onClick={() => salesMode === "month" ? moveMonth(1) : setSalesYear(String(Number(salesYear) + 1))} style={{ width: 38, height: 34, borderRadius: 9, border: `1px solid ${T.borderLight}`, background: T.inputBg, color: T.text, fontSize: sz(15), fontWeight: 800, cursor: "pointer", fontFamily: FN }}>›</button>
+          </div>
+          <div style={{ background: T.barBg, borderRadius: 10, padding: "12px 14px", textAlign: "center" }}>
+            <div style={{ fontSize: sz(11), color: T.textDim, marginBottom: 3 }}>{salesMode === "month" ? "月間売上" : "年間売上"}</div>
+            <div style={{ fontSize: sz(28), fontWeight: 900, color: T.accent }}>¥{totalRow.total.toLocaleString()}</div>
+          </div>
+        </div>
+        <div style={aC}>
+          <div style={aT2}>会社別内訳</div>
+          {rowEl(totalRow, true)}
+          {activeRows.map(r => rowEl(r))}
+          {salesLogs.length === 0 && <div style={{ fontSize: sz(12), color: T.textDim, textAlign: "center", padding: "12px 0" }}>この期間の記録はありません</div>}
+        </div>
+      </AnaPage>
+    );
+  }
+
   // ═══ DAILY REPORT (FREE) ═══
   if (anaScreen === "daily") {
     const drDate = dailyReportDate;
@@ -1554,6 +2431,7 @@ export default function App() {
     const drWkMs = Math.max(0, drSesMs - drBrkMs);
     const drHB = drWkMs > 0 ? Math.round(drRev / (drWkMs / 3600000)) : 0;
     const drHA = drWkMs > 0 ? Math.round((drRev + drInc) / (drWkMs / 3600000)) : 0;
+    const drRain = rainStatsForLog(drLog);
     const drHourly = Array.from({ length: 24 }, (_, h) => {
       const ds = drDels.filter(d => d.orderTime && new Date(d.orderTime).getHours() === h);
       return { name: `${h}`, 件数: ds.reduce((s, d) => s + dc(d), 0) };
@@ -1589,6 +2467,14 @@ export default function App() {
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
             <div style={aC}><div style={{ fontSize: sz(10), color: T.textMuted }}>基本時給</div><div style={{ fontSize: sz(22), fontWeight: 800, color: T.accent, marginTop: 2 }}>¥{drHB.toLocaleString()}</div></div>
             <div style={aC}><div style={{ fontSize: sz(10), color: T.purple }}>実質時給</div><div style={{ fontSize: sz(22), fontWeight: 800, color: T.purple, marginTop: 2 }}>¥{drHA.toLocaleString()}</div></div>
+          </div>
+          <div style={aC}>
+            <div style={aT2}>実測雨量</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+              <div><div style={{ fontSize: sz(10), color: T.textDim }}>状態</div><div style={{ fontSize: sz(14), fontWeight: 800, color: drRain.max && drRain.max > 0 ? "#3B82F6" : T.text }}>{drRain.level}</div></div>
+              <div><div style={{ fontSize: sz(10), color: T.textDim }}>最大</div><div style={{ fontSize: sz(14), fontWeight: 800, color: T.text }}>{drRain.max != null ? `${drRain.max}mm` : "-"}</div></div>
+              <div><div style={{ fontSize: sz(10), color: T.textDim }}>取得</div><div style={{ fontSize: sz(14), fontWeight: 800, color: T.text }}>{drRain.samples}回</div></div>
+            </div>
           </div>
 
           {/* Hourly bar chart */}
@@ -1674,6 +2560,128 @@ export default function App() {
             })()}
           </div>
         </>)}
+      </AnaPage>
+    );
+  }
+
+  // ═══ WEEKDAY x HOUR WAGE TABLE ═══
+  if (anaScreen === "hourwage") {
+    const HW_PERIODS = [
+      { key: "week", label: "1週間", free: false },
+      { key: "month", label: "1ヶ月", free: false },
+      { key: "half", label: "半年", free: false },
+      { key: "all", label: "全期間", free: false },
+    ];
+    const hwPeriodItem = HW_PERIODS.find(p => p.key === hwPeriod) || HW_PERIODS[1];
+    const hwCanView = hwPeriodItem.free || isPremium;
+    const nowMsHw = Date.now();
+    const msDayHw = 86400000;
+    const hwLogs = anaAll.filter(l => {
+      if (!l?.date) return false;
+      if (hwPeriod === "week") return l.date >= toLD(nowMsHw - 6 * msDayHw);
+      if (hwPeriod === "month") return l.date?.startsWith(todayDate.slice(0, 7));
+      if (hwPeriod === "half") return l.date >= toLD(nowMsHw - 180 * msDayHw);
+      return true;
+    });
+    const overlapMs = (aStart, aEnd, bStart, bEnd) => Math.max(0, Math.min(aEnd, bEnd) - Math.max(aStart, bStart));
+    const cells = Array.from({ length: 24 }, () => Array.from({ length: 7 }, () => ({ rev: 0, workMs: 0, cnt: 0, days: new Set() })));
+    hwLogs.forEach(log => {
+      const dayStart = new Date(`${log.date}T00:00:00`).getTime();
+      const dow = new Date(`${log.date}T00:00:00`).getDay();
+      for (let h = 0; h < 24; h++) {
+        const hs = dayStart + h * 3600000;
+        const he = hs + 3600000;
+        const ses = (log.sessions || []).reduce((s, x) => s + (x.start ? overlapMs(x.start, x.end || nowMsHw, hs, he) : 0), 0) + (log.currentSessionStart ? overlapMs(log.currentSessionStart, nowMsHw, hs, he) : 0);
+        const brk = (log.breaks || []).reduce((s, b) => s + (b.start ? overlapMs(b.start, b.end || nowMsHw, hs, he) : 0), 0) + (log.currentBreakStart ? overlapMs(log.currentBreakStart, nowMsHw, hs, he) : 0);
+        const work = Math.max(0, ses - brk);
+        if (work > 0) {
+          cells[h][dow].workMs += work;
+          cells[h][dow].days.add(log.date);
+        }
+      }
+      (log.deliveries || []).filter(d => !d.cancelled && d.orderTime).forEach(d => {
+        const dt = new Date(d.orderTime);
+        const h = dt.getHours();
+        const dDow = dt.getDay();
+        cells[h][dDow].rev += (d.reward || 0) + (d.incentive || 0);
+        cells[h][dDow].cnt += dc(d);
+      });
+    });
+    const matrix = cells.map((row, h) => row.map((c, dow) => {
+      const wage = c.workMs >= 900000 && c.rev > 0 ? Math.round(c.rev / (c.workMs / 3600000)) : 0;
+      return { ...c, hour: h, dow, wage, dayCount: c.days.size };
+    }));
+    const values = matrix.flat().filter(c => c.wage > 0).map(c => c.wage);
+    const maxWage = Math.max(...values, 1);
+    const bestCell = matrix.flat().filter(c => c.cnt >= 3 && c.dayCount >= 2).sort((a, b) => b.wage - a.wage)[0];
+    const nowCell = matrix[new Date().getHours()]?.[new Date().getDay()];
+    const dowLabels = ["日", "月", "火", "水", "木", "金", "土"];
+    const cellBg = (c) => {
+      if (!c.wage) return T.barBg;
+      const strength = Math.min(0.85, Math.max(0.18, c.wage / maxWage));
+      if (c.cnt < 3 || c.dayCount < 2) return `rgba(156, 163, 175, ${strength})`;
+      return `rgba(34, 197, 94, ${strength})`;
+    };
+    return (
+      <AnaPage title="🧭 曜日×時間 時給表">
+        <div style={{ display: "flex", gap: 3, marginBottom: 10, background: T.barBg, borderRadius: 10, padding: 3 }}>
+          {HW_PERIODS.map(p => {
+            const active = hwPeriod === p.key;
+            const locked = !p.free && !isPremium;
+            return (
+              <button key={p.key} onClick={() => setHwPeriod(p.key)}
+                style={{ padding: "7px 0", flex: 1, borderRadius: 8, border: "none", cursor: "pointer", fontFamily: FN, fontSize: sz(10), fontWeight: active ? 800 : 500, background: active ? T.accent : "transparent", color: active ? "#000" : locked ? T.textDim : T.text }}>
+                {p.label}{locked ? "🔒" : ""}
+              </button>
+            );
+          })}
+        </div>
+        {hwCanView ? (<>
+          <div style={aC}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <div>
+                <div style={{ fontSize: sz(10), color: T.textDim }}>今の時間</div>
+                <div style={{ fontSize: sz(18), fontWeight: 900, color: nowCell?.wage ? T.accent : T.textDim }}>{nowCell?.wage ? `¥${nowCell.wage.toLocaleString()}/h` : "-"}</div>
+                <div style={{ fontSize: sz(10), color: T.textMuted }}>{nowCell?.cnt || 0}件 / {nowCell?.dayCount || 0}日</div>
+              </div>
+              <div>
+                <div style={{ fontSize: sz(10), color: T.textDim }}>最高実績</div>
+                <div style={{ fontSize: sz(18), fontWeight: 900, color: bestCell ? "#22C55E" : T.textDim }}>{bestCell ? `¥${bestCell.wage.toLocaleString()}/h` : "-"}</div>
+                <div style={{ fontSize: sz(10), color: T.textMuted }}>{bestCell ? `${dowLabels[bestCell.dow]}曜 ${bestCell.hour}時台` : "データ不足"}</div>
+              </div>
+            </div>
+          </div>
+          <div style={{ ...aC, padding: 10 }}>
+            <div style={aT2}>時給表</div>
+            <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch" }}>
+              <div style={{ minWidth: 560 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "42px repeat(7, 1fr)", gap: 3, marginBottom: 4 }}>
+                  <div />
+                  {dowLabels.map(d => <div key={d} style={{ fontSize: sz(11), color: T.textMuted, textAlign: "center", fontWeight: 700 }}>{d}</div>)}
+                </div>
+                {matrix.map((row, h) => (
+                  <div key={h} style={{ display: "grid", gridTemplateColumns: "42px repeat(7, 1fr)", gap: 3, marginBottom: 3 }}>
+                    <div style={{ fontSize: sz(10), color: T.textDim, display: "flex", alignItems: "center" }}>{h}時</div>
+                    {row.map(c => (
+                      <div key={`${h}-${c.dow}`} style={{ height: 34, borderRadius: 6, background: cellBg(c), border: `1px solid ${T.border}`, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", opacity: c.wage ? 1 : 0.45 }}>
+                        <div style={{ fontSize: sz(10), fontWeight: 900, color: c.wage ? "#FFF" : T.textDim, lineHeight: 1 }}>{c.wage ? Math.round(c.wage / 100) / 10 : "-"}</div>
+                        {c.cnt > 0 && <div style={{ fontSize: sz(8), color: c.wage ? "#FFFFFFCC" : T.textDim, lineHeight: 1.1 }}>{c.cnt}件</div>}
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 8, fontSize: sz(10), color: T.textDim }}>
+              <span>表示値: 千円/h</span>
+              <span>灰色: 件数少</span>
+            </div>
+          </div>
+        </>) : (
+          <PremiumBlur>
+            <div style={aC}><div style={{ height: 420 }} /></div>
+          </PremiumBlur>
+        )}
       </AnaPage>
     );
   }
@@ -2189,10 +3197,19 @@ export default function App() {
       const old = l.onlineStart ? ((l.onlineEnd || Date.now()) - l.onlineStart) : 0;
       const brk = (l.breaks || []).reduce((bs, b) => bs + (b.end && b.start ? b.end - b.start : 0), 0);
       const workMs = Math.max(0, (ses || old) - brk);
-      const dels = (l.deliveries || []).filter(d => !d.cancelled && d.apiWeather);
+      const dels = (l.deliveries || []).filter(d => !d.cancelled && (d.apiWeather || d.storeWeather));
       const cnt = dels.length || 1;
-      return dels.map(d => ({ ...d, _workShare: workMs / cnt }));
+      return dels.map(d => ({ ...d, apiWeather: d.apiWeather || d.storeWeather, _weatherSource: d.apiWeather ? "order" : "store", _workShare: workMs / cnt }));
     });
+    const cwSamples = anaAll.flatMap(l => weatherSamplesForLog(l).map(s => ({ ...s, _date: l.date })));
+    const rainSummary = (() => {
+      const vals = cwSamples.map(s => s.precipitation).filter(v => v !== null && v !== undefined && !Number.isNaN(Number(v))).map(Number);
+      const max = vals.length ? Math.max(...vals) : null;
+      const avg = vals.length ? Math.round((vals.reduce((s, v) => s + v, 0) / vals.length) * 10) / 10 : null;
+      const rainy = vals.filter(v => v > 0).length;
+      const rainyDays = new Set(cwSamples.filter(s => Number(s.precipitation || 0) > 0).map(s => s._date)).size;
+      return { samples: vals.length, max, avg, rainy, rainyDays };
+    })();
 
     const calcGroup = (filtered) => {
       const rev = filtered.reduce((s, d) => s + (d.reward || 0), 0);
@@ -2266,6 +3283,15 @@ export default function App() {
     return (
       <AnaPage title="🌡️ 気象コンディション分析">
         <PremiumBlur>
+          <div style={aC}>
+            <div style={aT2}>実測雨量データ</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+              <div><div style={{ fontSize: sz(10), color: T.textDim }}>取得数</div><div style={{ fontSize: sz(17), fontWeight: 900, color: T.text }}>{rainSummary.samples}回</div></div>
+              <div><div style={{ fontSize: sz(10), color: T.textDim }}>最大雨量</div><div style={{ fontSize: sz(17), fontWeight: 900, color: rainSummary.max && rainSummary.max > 0 ? "#3B82F6" : T.text }}>{rainSummary.max != null ? `${rainSummary.max}mm` : "-"}</div></div>
+              <div><div style={{ fontSize: sz(10), color: T.textDim }}>雨あり日</div><div style={{ fontSize: sz(17), fontWeight: 900, color: T.text }}>{rainSummary.rainyDays}日</div></div>
+            </div>
+            <div style={{ fontSize: sz(10), color: T.textDim, marginTop: 8 }}>受注時・店舗到着時に取得した雨量を日別ログに保存して集計しています</div>
+          </div>
           {/* Summary insight card */}
           {(bestTemp || rainDiff > 0) && (
             <div style={{ background: `${T.purple}15`, border: `1px solid ${T.purpleBorder}`, borderRadius: 12, padding: "12px 14px", marginBottom: 10 }}>
@@ -2510,12 +3536,14 @@ export default function App() {
     const getSlot = (ts) => { if (!ts) return null; const h = new Date(ts).getHours(); return TIME_SLOTS_EF.find(s => h >= s.min && h <= s.max)?.key || null; };
     const getDayType = (dateStr) => isHoliday(dateStr) ? "holiday" : "weekday";
 
-    // Build delivery data with context
+    // Median helper
+    const median = (arr) => { if (!arr.length) return 0; const s = [...arr].sort((a, b) => a - b); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+    // Build delivery data with context (exclude: <3min duration, non-PickGo with perMin>=100)
     const buildDels = (dels, dateStr) => dels.filter(d => !d.cancelled && d.orderTime && d.completeTime).map(d => {
       const durMin = (d.completeTime - d.orderTime) / 60000;
       const perMin = durMin > 0 ? (d.reward || 0) / durMin : 0;
       return { ...d, durMin, perMin, _date: dateStr, _dayType: getDayType(dateStr), _slot: getSlot(d.orderTime) };
-    });
+    }).filter(d => d.durMin >= 3 && !(d.company !== "pickgo" && d.perMin >= 100));
 
     const todayDels2 = buildDels(data.deliveries, todayDate2);
     // Recent 3 days (free tier)
@@ -2534,7 +3562,7 @@ export default function App() {
     // Tiered analysis levels
     const anaLevel = (totalCount >= 200 && workDaysCount >= 21) ? 3 : (totalCount >= 100 && workDaysCount >= 14) ? 2 : (totalCount >= 30 && workDaysCount >= 7) ? 1 : 0;
     const hasEnoughData = anaLevel >= 1;
-    const avgPerMin = allDels2.length > 0 ? allDels2.reduce((s, d) => s + d.perMin, 0) / allDels2.length : 0;
+    const avgPerMin = allDels2.length > 0 ? median(allDels2.map(d => d.perMin)) : 0;
     // Monthly work hours for impact calculation
     const monthlyWorkMs = (() => { let total = 0, days = 0; allLogs.forEach(l => { const ses = (l.sessions || []).reduce((s, x) => s + ((x.end || 0) - x.start), 0); const brk = (l.breaks || []).reduce((s, b) => s + ((b.end || 0) - (b.start || 0)), 0); if (ses > 0) { total += ses - brk; days++; } }); return days > 0 ? total / days * 30 : 0; })();
     const monthlyWorkH = monthlyWorkMs / 3600000;
@@ -2543,7 +3571,7 @@ export default function App() {
     // useDayType: true=平日/土日祝で分ける(PRO), false=分けない(無料)
     const detectRules = (dels, useDayType = true) => {
       const rules = [];
-      const avg = dels.length > 0 ? dels.reduce((s, d) => s + d.perMin, 0) / dels.length : 0;
+      const avg = dels.length > 0 ? median(dels.map(d => d.perMin)) : 0;
       if (avg <= 0 || dels.length < 15) return rules;
 
       // Rule 1: Company × Time (optionally within same dayType)
@@ -2556,7 +3584,7 @@ export default function App() {
       });
       Object.values(coTimeMap).forEach(g => {
         if (g.perMins.length < 15) return;
-        const gAvg = g.perMins.reduce((s, v) => s + v, 0) / g.perMins.length;
+        const gAvg = median(g.perMins);
         const diff = (gAvg - avg) / avg;
         if (diff < -0.15) {
           const coName = COS.find(c => c.id === g.company)?.name || g.company;
@@ -2577,20 +3605,17 @@ export default function App() {
         if (d.orderType === "single") slotDayGroups[key].single.push(d.perMin);
         else slotDayGroups[key].multi.push(d.perMin);
       });
-      let multiTotal = 0, multiSum = 0, singleAvgWeighted = 0, singleWeight = 0;
+      let allMultiPMs = [], allSinglePMs = [];
       Object.values(slotDayGroups).forEach(g => {
         if (g.single.length >= 3 && g.multi.length >= 3) {
-          const sAvg = g.single.reduce((s, v) => s + v, 0) / g.single.length;
-          const mAvg = g.multi.reduce((s, v) => s + v, 0) / g.multi.length;
-          multiTotal += g.multi.length;
-          multiSum += mAvg * g.multi.length;
-          singleAvgWeighted += sAvg * g.multi.length;
-          singleWeight += g.multi.length;
+          allMultiPMs.push(...g.multi);
+          allSinglePMs.push(...g.single);
         }
       });
-      if (multiTotal >= 15 && singleWeight > 0) {
-        const mAvg = multiSum / multiTotal;
-        const sAvg = singleAvgWeighted / singleWeight;
+      const multiTotal = allMultiPMs.length;
+      if (multiTotal >= 15 && allSinglePMs.length >= 15) {
+        const mAvg = median(allMultiPMs);
+        const sAvg = median(allSinglePMs);
         const diff = (mAvg - sAvg) / sAvg;
         if (diff < -0.15) {
           const totalMin = multiTotal * (dels.reduce((s, d) => s + d.durMin, 0) / dels.length);
@@ -2614,8 +3639,8 @@ export default function App() {
         sorted.slice(mid).forEach(d => secondHalfPMs.push(d.perMin));
       });
       if (firstHalfPMs.length >= 15 && secondHalfPMs.length >= 15) {
-        const fAvg = firstHalfPMs.reduce((s, v) => s + v, 0) / firstHalfPMs.length;
-        const sAvg2 = secondHalfPMs.reduce((s, v) => s + v, 0) / secondHalfPMs.length;
+        const fAvg = median(firstHalfPMs);
+        const sAvg2 = median(secondHalfPMs);
         const diff = (sAvg2 - fAvg) / fAvg;
         if (diff < -0.15) {
           rules.push({ type: "overtime", label: "稼働後半の効率低下", gAvg: Math.round(sAvg2), avg: Math.round(fAvg), diff: Math.round(diff * 100), count: secondHalfPMs.length, monthImpact: Math.round((fAvg - sAvg2) * secondHalfPMs.length * (30 / Math.max(1, Object.keys(daySessionDels).length))), icon: "⏰" });
@@ -2628,8 +3653,8 @@ export default function App() {
         const lowDels = dels.filter(d => (d.reward || 0) <= thresh);
         const highDels = dels.filter(d => (d.reward || 0) > thresh);
         if (lowDels.length >= 15 && highDels.length >= 15) {
-          const lowAvg = lowDels.reduce((s, d) => s + d.perMin, 0) / lowDels.length;
-          const highAvg = highDels.reduce((s, d) => s + d.perMin, 0) / highDels.length;
+          const lowAvg = median(lowDels.map(d => d.perMin));
+          const highAvg = median(highDels.map(d => d.perMin));
           const diff = (lowAvg - highAvg) / highAvg;
           if (diff < -0.15) {
             const totalMin = lowDels.reduce((s, d) => s + d.durMin, 0);
@@ -2649,7 +3674,7 @@ export default function App() {
       });
       Object.entries(areaMap).forEach(([area, pms]) => {
         if (pms.length < 15) return;
-        const aAvg = pms.reduce((s, v) => s + v, 0) / pms.length;
+        const aAvg = median(pms);
         const diff = (aAvg - avg) / avg;
         if (diff < -0.15) {
           const totalMin = pms.length * (dels.reduce((s, d) => s + d.durMin, 0) / dels.length);
@@ -2683,28 +3708,42 @@ export default function App() {
       }).length;
     }, 0);
 
-    const RuleCard = ({ rule }) => (
-      <div style={{ ...aC, padding: "14px 16px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-          <div style={{ fontSize: sz(14), fontWeight: 700, color: T.text }}>{rule.icon} {rule.label}</div>
-          <div style={{ fontSize: sz(11), color: T.textDim }}>{rule.count}件</div>
-        </div>
-        <div style={{ display: "flex", gap: 12, marginBottom: 8 }}>
-          <div style={{ flex: 1, background: "#EF444418", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
-            <div style={{ fontSize: sz(9), color: "#EF4444", marginBottom: 2 }}>この条件</div>
-            <div style={{ fontSize: sz(16), fontWeight: 800, color: "#EF4444" }}>¥{rule.gAvg}<span style={{ fontSize: sz(9) }}>/分</span></div>
+    const ruleAction = (rule) => {
+      const targetPM = Math.max(1, Math.ceil((rule.avg || avgPerMin || 0) / 5) * 5);
+      const rewardNum = parseInt(rule.label.match(/\d+/)?.[0] || "0", 10);
+      if (rule.type === "low_reward") return `報酬¥${rewardNum + 100}以上、または¥${targetPM}/分以上を基準にする`;
+      if (rule.type === "multi_trap") return `複数案件は¥${targetPM}/分以上だけ取る`;
+      if (rule.type === "overtime") return `後半に¥${targetPM}/分を下回るなら休憩を挟む`;
+      return `この条件では¥${targetPM}/分以上の案件だけ取る`;
+    };
+    const RuleCard = ({ rule }) => {
+      const targetPM = Math.max(1, Math.ceil((rule.avg || avgPerMin || 0) / 5) * 5);
+      return (
+        <div style={{ ...aC, padding: "14px 16px" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <div style={{ fontSize: sz(14), fontWeight: 700, color: T.text }}>{rule.icon} {rule.label}</div>
+            <div style={{ fontSize: sz(11), color: T.textDim }}>{rule.count}件</div>
           </div>
-          <div style={{ flex: 1, background: "#22C55E18", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
-            <div style={{ fontSize: sz(9), color: "#22C55E", marginBottom: 2 }}>{rule.type === "multi_trap" ? "シングル" : rule.type === "overtime" ? "前半" : "全体平均"}</div>
-            <div style={{ fontSize: sz(16), fontWeight: 800, color: "#22C55E" }}>¥{rule.avg}<span style={{ fontSize: sz(9) }}>/分</span></div>
+          <div style={{ display: "flex", gap: 12, marginBottom: 8 }}>
+            <div style={{ flex: 1, background: "#EF444418", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
+              <div style={{ fontSize: sz(9), color: "#EF4444", marginBottom: 2 }}>この条件</div>
+              <div style={{ fontSize: sz(16), fontWeight: 800, color: "#EF4444" }}>¥{rule.gAvg}<span style={{ fontSize: sz(9) }}>/分</span></div>
+            </div>
+            <div style={{ flex: 1, background: "#22C55E18", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
+              <div style={{ fontSize: sz(9), color: "#22C55E", marginBottom: 2 }}>取る基準</div>
+              <div style={{ fontSize: sz(16), fontWeight: 800, color: "#22C55E" }}>¥{targetPM}<span style={{ fontSize: sz(9) }}>/分</span></div>
+            </div>
+          </div>
+          <div style={{ background: T.barBg, borderRadius: 8, padding: "8px 10px", marginBottom: 8 }}>
+            <div style={{ fontSize: sz(12), color: T.text, fontWeight: 700 }}>{ruleAction(rule)}</div>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ fontSize: sz(12), color: "#EF4444", fontWeight: 700 }}>{rule.diff}%</div>
+            <div style={{ fontSize: sz(12), color: T.textMuted }}>改善で月 <span style={{ fontWeight: 700, color: "#22C55E" }}>+¥{rule.monthImpact.toLocaleString()}</span></div>
           </div>
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div style={{ fontSize: sz(12), color: "#EF4444", fontWeight: 700 }}>{rule.diff}%</div>
-          <div style={{ fontSize: sz(12), color: T.textMuted }}>改善で月 <span style={{ fontWeight: 700, color: "#22C55E" }}>+¥{rule.monthImpact.toLocaleString()}</span></div>
-        </div>
-      </div>
-    );
+      );
+    };
 
     return (
       <AnaPage title="🎯 効率化ポイント">
@@ -2747,8 +3786,8 @@ export default function App() {
             <>
               <div style={{ display: "flex", justifyContent: "space-around", marginBottom: 8 }}>
                 <div style={{ textAlign: "center" }}>
-                  <div style={{ fontSize: sz(10), color: T.textDim }}>平均分給</div>
-                  <div style={{ fontSize: sz(20), fontWeight: 800, color: T.accent }}>¥{Math.round(recentDels.reduce((s, d) => s + d.perMin, 0) / recentDels.length)}<span style={{ fontSize: sz(10) }}>/分</span></div>
+                  <div style={{ fontSize: sz(10), color: T.textDim }}>中央分給</div>
+                  <div style={{ fontSize: sz(20), fontWeight: 800, color: T.accent }}>¥{Math.round(median(recentDels.map(d => d.perMin)))}<span style={{ fontSize: sz(10) }}>/分</span></div>
                 </div>
                 <div style={{ textAlign: "center" }}>
                   <div style={{ fontSize: sz(10), color: T.textDim }}>配達件数</div>
@@ -2759,8 +3798,8 @@ export default function App() {
                 <>
                   <div style={{ fontSize: sz(11), color: "#F59E0B", fontWeight: 600, marginBottom: 6 }}>⚠ 改善ポイント</div>
                   {recentRules.slice(0, 3).map((r, i) => (
-                    <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderTop: i > 0 ? `1px solid ${T.border}` : "none" }}>
-                      <span style={{ fontSize: sz(12), color: T.text }}>{r.icon} {r.label}</span>
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "6px 0", borderTop: i > 0 ? `1px solid ${T.border}` : "none" }}>
+                      <span style={{ fontSize: sz(12), color: T.text }}>{r.icon} {ruleAction(r)}</span>
                       <span style={{ fontSize: sz(12), color: "#EF4444", fontWeight: 600 }}>{r.diff}%</span>
                     </div>
                   ))}
@@ -2783,7 +3822,7 @@ export default function App() {
                 {allRules.slice(0, 5).map((r, i) => (
                   <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderTop: i > 0 ? `1px solid ${T === LIGHT ? "#FDE68A44" : "#42381A"}` : "none" }}>
                     <div>
-                      <span style={{ fontSize: sz(12), color: T.text, fontWeight: 600 }}>{i + 1}. {r.icon} {r.label}を避ける</span>
+                      <span style={{ fontSize: sz(12), color: T.text, fontWeight: 600 }}>{i + 1}. {r.icon} {ruleAction(r)}</span>
                     </div>
                     <span style={{ fontSize: sz(12), fontWeight: 700, color: "#22C55E" }}>+¥{r.monthImpact.toLocaleString()}/月</span>
                   </div>
@@ -2810,15 +3849,9 @@ export default function App() {
               <div style={aC}>
                 <div style={{ fontSize: sz(13), fontWeight: 700, color: T.text, marginBottom: 8 }}>💡 改善アドバイス</div>
                 {allRules.slice(0, 2).map((r, i) => {
-                  const advice = r.type === "company_time" ? `${r.label}は効率が低めです。この条件を避けてみましょう。`
-                    : r.type === "multi_trap" ? "ダブル・トリプル案件がシングルより効率が悪い傾向があります。シングルを優先してみましょう。"
-                    : r.type === "overtime" ? "稼働後半に効率が下がっています。早めに休憩を取ると改善するかもしれません。"
-                    : r.type === "low_reward" ? `${r.label}は効率を下げています。高報酬の案件を待つことも検討しましょう。`
-                    : r.type === "area" ? `${r.label}は効率が低めです。別のエリアへの移動を検討しましょう。`
-                    : "改善の余地があります。";
                   return (
                     <div key={i} style={{ padding: "8px 0", borderTop: i > 0 ? `1px solid ${T.border}` : "none" }}>
-                      <div style={{ fontSize: sz(12), color: T.text, lineHeight: 1.6 }}>{r.icon} {advice}</div>
+                      <div style={{ fontSize: sz(12), color: T.text, lineHeight: 1.6 }}>{r.icon} {ruleAction(r)}</div>
                     </div>
                   );
                 })}
@@ -3136,6 +4169,148 @@ export default function App() {
     );
   }
 
+  if (anaScreen === "storewait") {
+    const PERIODS = [
+      { key: "today", label: "本日", free: true },
+      { key: "week", label: "1週間", free: false },
+      { key: "month", label: "1ヶ月", free: false },
+      { key: "half", label: "半年", free: false },
+      { key: "year", label: "1年", free: false },
+      { key: "all", label: "全期間", free: false },
+    ];
+    const TIME_SLOTS = [
+      { key: "all", label: "全時間" },
+      { key: "morning", label: "朝 6-10時" },
+      { key: "lunch", label: "昼 11-14時" },
+      { key: "afternoon", label: "午後 15-17時" },
+      { key: "dinner", label: "夜 18-21時" },
+      { key: "night", label: "深夜 22-5時" },
+    ];
+    const TIME_LABELS = { all: "時間帯", morning: "朝", lunch: "昼", afternoon: "午後", dinner: "夜", night: "深夜" };
+    const DOW_OPTS = [
+      { key: "all", label: "全曜日" },
+      { key: "mon", label: "月曜日" }, { key: "tue", label: "火曜日" }, { key: "wed", label: "水曜日" },
+      { key: "thu", label: "木曜日" }, { key: "fri", label: "金曜日" }, { key: "sat", label: "土曜日" }, { key: "sun", label: "日曜日" },
+    ];
+    const DOW_LABELS = { all: "曜日", mon: "月", tue: "火", wed: "水", thu: "木", fri: "金", sat: "土", sun: "日" };
+    const COMPANY_OPTS = [{ key: "all", label: "全会社" }, ...COS.map(c => ({ key: c.id, label: c.name }))];
+    const CO_LABELS = { all: "会社", ...Object.fromEntries(COS.map(c => [c.id, c.letter])) };
+    const SW_WX_OPTS = [{ key: "all", label: "全天候" }, ...WEATHER.map(w => ({ key: w.id, label: `${w.icon} ${w.label}` }))];
+    const SW_WX_LABELS = { all: "天候", ...Object.fromEntries(WEATHER.map(w => [w.id, w.icon])) };
+    const periodItem = PERIODS.find(p => p.key === (swPeriod || "today")) || PERIODS[0];
+    const canView = periodItem.free || isPremium;
+    const hasFilter = swTimeSlot !== "all" || swDow !== "all" || swCompany !== "all" || swWeather !== "all";
+
+    const filterBtn = (label, ddKey, isActive) => (
+      <button onClick={(e) => { e.stopPropagation(); setSwDropdown(swDropdown === ddKey ? null : ddKey); }}
+        style={{
+          padding: "5px 10px", borderRadius: 8, border: "none", cursor: "pointer", fontFamily: FN,
+          fontSize: sz(11), fontWeight: isActive ? 700 : 500,
+          background: isActive ? T.accent : `${T.card}EE`,
+          color: isActive ? "#000" : T.text,
+          boxShadow: "0 2px 6px #0003", display: "flex", alignItems: "center", gap: 4,
+        }}>
+        {label}<span style={{ fontSize: sz(8), opacity: 0.6 }}>{swDropdown === ddKey ? "▲" : "▼"}</span>
+      </button>
+    );
+    const ddPanel = (items, current, setter) => (
+      <div style={{ position: "absolute", top: "100%", left: 0, marginTop: 4, background: T.card, border: `1px solid ${T.border}`, borderRadius: 10, boxShadow: "0 8px 24px #0006", padding: 4, minWidth: 130, zIndex: 1002 }}>
+        {items.map(item => (
+          <button key={item.key} onClick={(e) => { e.stopPropagation(); setter(item.key); setSwDropdown(null); }}
+            style={{ display: "block", width: "100%", textAlign: "left", padding: "8px 12px", border: "none", borderRadius: 7, cursor: "pointer", fontFamily: FN, fontSize: sz(12), fontWeight: current === item.key ? 700 : 400, background: current === item.key ? `${T.accent}22` : "transparent", color: current === item.key ? T.accent : T.text }}>
+            {current === item.key ? "✓ " : "   "}{item.label}
+          </button>
+        ))}
+      </div>
+    );
+
+    return (
+      <div style={{ background: T.bg, height: "100dvh", maxWidth: 430, margin: "0 auto", fontFamily: FN, color: T.text }}
+        onClick={() => setSwDropdown(null)}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px 8px", height: 48 }}>
+          <div style={{ fontSize: sz(17), fontWeight: 700 }}>🏪 店舗待機マップ</div>
+          <button style={{ background: "none", border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.textSub, padding: "4px 10px", fontSize: sz(12), cursor: "pointer", fontFamily: FN }} onClick={() => setScreen("main")}>戻る</button>
+        </div>
+        <div style={{ height: "calc(100dvh - 48px)", position: "relative", borderTop: `1px solid ${T.border}` }}>
+          <div ref={swElRef} style={{ height: "100%", width: "100%" }} />
+
+          <div style={{ position: "absolute", top: 10, left: 10, right: 10, zIndex: 1000 }}>
+            <div style={{ display: "flex", gap: 3, marginBottom: 6 }}>
+              {PERIODS.map(p => {
+                const active = (swPeriod || "today") === p.key;
+                const locked = !p.free && !isPremium;
+                return (
+                  <button key={p.key} onClick={(e) => { e.stopPropagation(); setSwPeriod(p.key); setSwDropdown(null); }}
+                    style={{
+                      padding: "5px 0", flex: 1, borderRadius: 8, border: "none", cursor: "pointer", fontFamily: FN,
+                      fontSize: sz(10), fontWeight: active ? 700 : 500,
+                      background: active ? T.accent : `${T.card}EE`,
+                      color: active ? "#000" : locked ? T.textDim : T.text,
+                      boxShadow: "0 2px 6px #0003",
+                    }}>
+                    {p.label}{locked ? "🔒" : ""}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <div style={{ position: "relative" }}>
+                {filterBtn(TIME_LABELS[swTimeSlot], "time", swTimeSlot !== "all")}
+                {swDropdown === "time" && ddPanel(TIME_SLOTS, swTimeSlot, setSwTimeSlot)}
+              </div>
+              <div style={{ position: "relative" }}>
+                {filterBtn(DOW_LABELS[swDow], "dow", swDow !== "all")}
+                {swDropdown === "dow" && ddPanel(DOW_OPTS, swDow, setSwDow)}
+              </div>
+              <div style={{ position: "relative" }}>
+                {filterBtn(CO_LABELS[swCompany], "company", swCompany !== "all")}
+                {swDropdown === "company" && ddPanel(COMPANY_OPTS, swCompany, setSwCompany)}
+              </div>
+              <div style={{ position: "relative" }}>
+                {filterBtn(SW_WX_LABELS[swWeather], "weather", swWeather !== "all")}
+                {swDropdown === "weather" && ddPanel(SW_WX_OPTS, swWeather, setSwWeather)}
+              </div>
+              {hasFilter && (
+                <button onClick={(e) => { e.stopPropagation(); setSwTimeSlot("all"); setSwDow("all"); setSwCompany("all"); setSwWeather("all"); setSwDropdown(null); }}
+                  style={{ padding: "5px 8px", borderRadius: 8, border: "none", cursor: "pointer", fontFamily: FN, fontSize: sz(10), background: `${T.card}EE`, color: T.textDim, boxShadow: "0 2px 6px #0003" }}>
+                  ✕
+                </button>
+              )}
+            </div>
+          </div>
+
+          {!canView && (
+            <div style={{ position: "absolute", inset: 0, zIndex: 999, background: `${T.bg}88`, backdropFilter: "blur(3px)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+              <div style={{ fontSize: sz(14), fontWeight: 700, color: T.purple, marginBottom: 4 }}>プレミアムで解放</div>
+              <div style={{ fontSize: sz(11), color: T.textDim }}>過去データの店舗待機マップが利用できます</div>
+            </div>
+          )}
+
+          <div style={{ position: "absolute", bottom: 10, left: 10, right: 10, zIndex: 1000, background: `${T.card}DD`, borderRadius: 10, padding: "8px 12px", boxShadow: "0 2px 8px #0003" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+              <div style={{ fontSize: sz(11), color: T.textMuted }}>待機5分以上 / 調理待ちキャンセル</div>
+              <div style={{ fontSize: sz(13), fontWeight: 700, color: T.accent }}>{swPinCount}<span style={{ fontSize: sz(10), color: T.textMuted, fontWeight: 500 }}> 件</span></div>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {[
+                { label: "5分+", color: "#A855F7" },
+                { label: "10分+", color: "#F59E0B" },
+                { label: "15分+ / ｷｬﾝｾﾙ", color: "#EF4444" },
+              ].map(item => (
+                <div key={item.label} style={{ display: "flex", alignItems: "center", gap: 3 }}>
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", background: item.color }} />
+                  <span style={{ fontSize: sz(9), color: T.textMuted }}>{item.label}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ position: "absolute", bottom: 72, right: 10, zIndex: 1000, fontSize: 9, color: T.textDim, opacity: 0.7 }}>© OpenStreetMap</div>
+        </div>
+      </div>
+    );
+  }
+
   if (anaScreen === "heatmap") {
     const RATING_COLORS2 = { good: "#EAB308", normal: "#9CA3AF", bad: "#3B82F6", cancelled: "#EF4444" };
     const PERIODS = [
@@ -3296,9 +4471,12 @@ export default function App() {
 
   // ═══ HISTORY ═══
   if (screen === "history") {
-    // Build sorted past logs (excluding today)
+    // Build sorted logs (including today)
     const today = tds();
-    const pastLogs = allLogs.filter(l => l.date && l.date !== today).sort((a, b) => b.date.localeCompare(a.date));
+    const todayLog = { ...data, date: today };
+    const todayHasActivity = todayLog.deliveries.length > 0 || todayLog.sessions.length > 0 || !!todayLog.currentSessionStart || todayLog.breaks.length > 0 || todayLog.dailyIncentives.length > 0;
+    const allWithToday = todayHasActivity ? [todayLog, ...allLogs.filter(l => l.date && l.date !== today)] : allLogs.filter(l => l.date && l.date !== today);
+    const pastLogs = allWithToday.sort((a, b) => b.date.localeCompare(a.date));
     // Group by month
     const months = {};
     pastLogs.forEach(log => {
@@ -3312,8 +4490,10 @@ export default function App() {
       const c = COS.find(cc => cc.id === d.company);
       const ot = OT.find(o => o.id === d.orderType);
       const dur = d.completeTime && d.orderTime ? d.completeTime - d.orderTime : 0;
+      const storeWait = d.storeArrivalTime ? (d.storeDepartTime || d.completeTime || Date.now()) - d.storeArrivalTime : 0;
       const durMin = dur > 0 ? dur / 60000 : 0;
       const perMin = durMin > 0 ? Math.round((d.reward || 0) / durMin) : 0;
+      const histDetailEditable = canEditWorkTimes(histDetail.date);
       return (
         <div style={{ fontFamily: FN, background: T.bg, minHeight: "100dvh", height: "100dvh", maxWidth: 430, margin: "0 auto", color: T.text, padding: "14px 16px", overflowY: "auto" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -3327,16 +4507,36 @@ export default function App() {
                 <div style={{ width: 40, height: 40, borderRadius: 10, background: c?.bg || "#333", color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: sz(19), fontWeight: 800 }}>{c?.letter || "?"}</div>
                 <div>
                   <div style={{ fontSize: sz(15), fontWeight: 700, color: T.text }}>{c?.name || "不明"}</div>
-                  <div style={{ fontSize: sz(12), color: T.textMuted }}>{ot?.label || "シングル"}{d.cancelled && <span style={{ color: "#EF4444" }}> キャンセル</span>}</div>
+                  <div style={{ fontSize: sz(12), color: T.textMuted }}>{ot?.label || "シングル"}{d.cancelled && <span style={{ color: "#EF4444" }}> {d.cancelType === "before_store" ? "未到着キャンセル" : "調理待ちキャンセル"}</span>}</div>
                 </div>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>日付</span><span style={{ fontSize: sz(14), fontWeight: 600, color: T.text }}>{histDetail.date}</span></div>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>時間</span><span style={{ fontSize: sz(14), fontWeight: 600, color: T.text }}>{ft(d.orderTime)}〜{ft(d.completeTime)}</span></div>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>所要時間</span><span style={{ fontSize: sz(14), fontWeight: 600, color: T.text }}>{fm(dur)}</span></div>
+              {storeWait > 0 && <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>店舗待機</span><span style={{ fontSize: sz(14), fontWeight: 600, color: storeWait >= 300000 || d.cancelType === "store_wait" ? "#EF4444" : T.text }}>{fm(storeWait)}</span></div>}
               {perMin > 0 && !d.cancelled && <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>分給</span><span style={{ fontSize: sz(15), fontWeight: 700, color: "#0EA5E9" }}>¥{perMin.toLocaleString()}/分</span></div>}
               <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}` }}><span style={{ fontSize: sz(13), color: T.textMuted }}>配達報酬</span><span style={{ fontSize: sz(17), fontWeight: 700, color: T.accent }}>¥{(d.reward || 0).toLocaleString()}</span></div>
-              {d.rawReward && <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0 7px" }}><span style={{ fontSize: sz(11), color: T.textDim }}>PickGo 入力金額</span><span style={{ fontSize: sz(13), color: T.textMuted }}>¥{d.rawReward.toLocaleString()}（手数料{Math.round((1 - d.reward / d.rawReward) * 100)}%引き）</span></div>}
-              {(d.incentive || 0) > 0 && <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}` }}><span style={{ fontSize: sz(13), color: T.textMuted }}>インセンティブ</span><span style={{ fontSize: sz(17), fontWeight: 700, color: T.purple }}>¥{(d.incentive || 0).toLocaleString()}</span></div>}
+              {d.rawReward && d.company === "pickgo" && <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0 7px" }}><span style={{ fontSize: sz(11), color: T.textDim }}>PickGo 入力金額</span><span style={{ fontSize: sz(13), color: T.textMuted }}>¥{d.rawReward.toLocaleString()}（手数料{Math.round((1 - d.reward / d.rawReward) * 100)}%引き）</span></div>}
+              {d.rawReward && d.company === "rocket" && d.rocketBonusRate > 0 && <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0 7px" }}><span style={{ fontSize: sz(11), color: T.textDim }}>Rocket Now 基本金額</span><span style={{ fontSize: sz(13), color: T.textMuted }}>¥{d.rawReward.toLocaleString()}（+{d.rocketBonusRate}%反映）</span></div>}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "7px 0", borderTop: `1px solid ${T.border}` }}>
+                <span style={{ fontSize: sz(13), color: T.textMuted }}>インセンティブ</span>
+                {histDetailEditable ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ fontSize: sz(13), color: T.purple, fontWeight: 700 }}>¥</span>
+                    <input
+                      type="number"
+                      inputMode="numeric"
+                      min="0"
+                      value={d.incentive || 0}
+                      onChange={(e) => setHistDetail(prev => ({ ...prev, delivery: { ...prev.delivery, incentive: parseInt(e.target.value, 10) || 0 } }))}
+                      style={{ width: 86, background: T.inputBg, border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.text, fontSize: sz(14), fontWeight: 700, padding: "5px 7px", fontFamily: FN, textAlign: "right" }}
+                    />
+                    <button onClick={saveHistDeliveryDetail} style={{ background: T.purple, border: "none", borderRadius: 7, color: "#FFF", padding: "5px 9px", fontSize: sz(11), fontWeight: 700, cursor: "pointer", fontFamily: FN }}>保存</button>
+                  </div>
+                ) : (
+                  <span style={{ fontSize: sz(17), fontWeight: 700, color: T.purple }}>¥{(d.incentive || 0).toLocaleString()}</span>
+                )}
+              </div>
               {d.rating && !d.cancelled && (
                 <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}` }}>
                   <span style={{ fontSize: sz(13), color: T.textMuted }}>評価</span>
@@ -3390,15 +4590,7 @@ export default function App() {
                     boxSizing: "border-box",
                   }}
                 />
-                <button onClick={async () => {
-                  const log = allLogs.find(l => l.date === histDetail.date);
-                  if (!log || histDetail.delIdx == null) return;
-                  log.deliveries[histDetail.delIdx].memo = d.memo || "";
-                  await svByDate(histDetail.date, log);
-                  setAllLogs(prev => prev.map(l => l.date === histDetail.date ? { ...log } : l));
-                  setHistDetail(prev => ({ ...prev, saved: true }));
-                  setTimeout(() => setHistDetail(prev => prev ? ({ ...prev, saved: false }) : null), 1500);
-                }} style={{ width: "100%", height: 40, borderRadius: 10, border: "none", background: T.accent, color: "#000", fontSize: sz(14), fontWeight: 700, cursor: "pointer", fontFamily: FN, marginTop: 6, letterSpacing: 1 }}>
+                <button onClick={saveHistDeliveryDetail} style={{ width: "100%", height: 40, borderRadius: 10, border: "none", background: T.accent, color: "#000", fontSize: sz(14), fontWeight: 700, cursor: "pointer", fontFamily: FN, marginTop: 6, letterSpacing: 1 }}>
                   {histDetail.saved ? "✓ 保存しました" : "メモを保存"}
                 </button>
               </div>
@@ -3448,10 +4640,13 @@ export default function App() {
                   const dCnt = actD.reduce((s, d) => s + dc(d), 0);
                   const dRev = dayRev(log, true);
                   const expanded = !!histExpanded[log.date];
-                  const sesTotal = (log.sessions || []).reduce((s, x) => s + (x.end - x.start), 0);
-                  const brkTotal = (log.breaks || []).reduce((s, b) => (b.start && b.end) ? s + (b.end - b.start) : s, 0);
+                  const sesTotal = calcSessionMs(log);
+                  const brkTotal = calcBreakMs(log);
                   const workTotal = Math.max(0, sesTotal - brkTotal);
                   const hrRate = workTotal > 0 ? Math.round(dRev / (workTotal / 3600000)) : 0;
+                  const workBounds = sessionBounds(log);
+                  const workEditable = canEditWorkTimes(log.date);
+                  const workEditing = histWorkEdit?.date === log.date;
                   return (
                     <div key={log.date} style={{ background: T.card, borderRadius: 12, border: `1px solid ${T.border}`, marginBottom: 6, overflow: "hidden" }}>
                       {/* Day summary - tap to expand */}
@@ -3472,6 +4667,52 @@ export default function App() {
                       {/* Expanded delivery list */}
                       {expanded && (
                         <div style={{ borderTop: `1px solid ${T.border}`, padding: "4px 12px 8px" }}>
+                          <div style={{ background: T.barBg, borderRadius: 10, padding: "9px 10px", margin: "6px 0 8px", border: `1px solid ${T.border}` }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }}>
+                              <div style={{ fontSize: sz(12), color: T.textSub, fontWeight: 700 }}>オンライン / オフライン</div>
+                              {workEditable ? (
+                                workEditing ? (
+                                  <button onClick={() => setHistWorkEdit(null)} style={{ background: "none", border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.textMuted, padding: "3px 8px", fontSize: sz(11), cursor: "pointer", fontFamily: FN }}>閉じる</button>
+                                ) : (
+                                  <button onClick={() => openHistWorkEdit(log)} style={{ background: T.inputBg, border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.text, padding: "3px 9px", fontSize: sz(11), fontWeight: 700, cursor: "pointer", fontFamily: FN }}>修正</button>
+                                )
+                              ) : (
+                                <span style={{ fontSize: sz(10), color: T.textDim }}>修正期限終了</span>
+                              )}
+                            </div>
+                            {workEditing ? (
+                              <>
+                                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+                                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                                    <span style={{ fontSize: sz(10), color: T.textDim }}>オンライン</span>
+                                    <input type="time" value={histWorkEdit.start} onChange={(e) => setHistWorkEdit(v => ({ ...v, start: e.target.value, error: null }))} style={{ background: T.inputBg, border: `1px solid ${T.accent}`, borderRadius: 7, color: T.text, fontSize: sz(14), padding: "6px 7px", fontFamily: FN }} />
+                                  </label>
+                                  <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                                    <span style={{ fontSize: sz(10), color: T.textDim }}>オフライン</span>
+                                    <input type="time" value={histWorkEdit.end} onChange={(e) => setHistWorkEdit(v => ({ ...v, end: e.target.value, error: null }))} placeholder={workBounds.active ? "稼働中" : ""} style={{ background: T.inputBg, border: `1px solid ${T.accent}`, borderRadius: 7, color: T.text, fontSize: sz(14), padding: "6px 7px", fontFamily: FN }} />
+                                  </label>
+                                </div>
+                                {histWorkEdit.error && <div style={{ fontSize: sz(11), color: "#EF4444", marginBottom: 7 }}>{histWorkEdit.error}</div>}
+                                <button onClick={saveHistWorkEdit} style={{ width: "100%", height: 36, borderRadius: 9, border: "none", background: T.accent, color: "#000", fontSize: sz(13), fontWeight: 800, cursor: "pointer", fontFamily: FN }}>稼働時間を保存</button>
+                                <div style={{ fontSize: sz(10), color: T.textDim, marginTop: 6 }}>修正できるのは翌日23:59までです</div>
+                              </>
+                            ) : (
+                              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                                <div>
+                                  <div style={{ fontSize: sz(10), color: T.textDim }}>オンライン</div>
+                                  <div style={{ fontSize: sz(14), fontWeight: 800, color: T.text }}>{ft(workBounds.start)}</div>
+                                </div>
+                                <div>
+                                  <div style={{ fontSize: sz(10), color: T.textDim }}>オフライン</div>
+                                  <div style={{ fontSize: sz(14), fontWeight: 800, color: workBounds.active ? "#22C55E" : T.text }}>{workBounds.active ? "稼働中" : ft(workBounds.end)}</div>
+                                </div>
+                                <div>
+                                  <div style={{ fontSize: sz(10), color: T.textDim }}>稼働</div>
+                                  <div style={{ fontSize: sz(14), fontWeight: 800, color: T.accent }}>{fd(workTotal)}</div>
+                                </div>
+                              </div>
+                            )}
+                          </div>
                           {dels.length === 0 ? (
                             <div style={{ padding: "8px 0", fontSize: sz(12), color: T.textDim, textAlign: "center" }}>配達なし</div>
                           ) : [...dels].reverse().map((d, i) => {
@@ -3504,18 +4745,48 @@ export default function App() {
                             );
                           })}
                           {/* Daily incentives */}
-                          {(log.dailyIncentives || []).length > 0 && (
-                            <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 6, marginTop: 2 }}>
-                              <div style={{ fontSize: sz(10), color: T.textDim, marginBottom: 4 }}>日次インセンティブ</div>
+                          {((log.dailyIncentives || []).length > 0 || workEditable) && (
+                            <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 7, marginTop: 4 }}>
+                              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
+                                <div style={{ fontSize: sz(10), color: T.textDim }}>日次インセンティブ</div>
+                                {workEditable && (
+                                  <button onClick={() => setHistIncEdit({ date: log.date, index: null, company: COS[0]?.id || "", amount: "", time: Date.now(), error: null })} style={{ background: T.inputBg, border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.text, padding: "3px 8px", fontSize: sz(10), fontWeight: 700, cursor: "pointer", fontFamily: FN }}>追加</button>
+                                )}
+                              </div>
+                              {(log.dailyIncentives || []).length === 0 && histIncEdit?.date !== log.date && (
+                                <div style={{ fontSize: sz(11), color: T.textDim, padding: "3px 0 5px" }}>未登録</div>
+                              )}
                               {log.dailyIncentives.map((di, j) => {
                                 const dic = COS.find(cc => cc.id === di.company);
                                 return (
-                                  <div key={j} style={{ display: "flex", alignItems: "center", gap: 6, padding: "3px 0" }}>
-                                    <div style={{ width: 20, height: 20, borderRadius: 5, background: dic?.bg || "#333", color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: sz(10), fontWeight: 700 }}>{dic?.letter || "?"}</div>
-                                    <span style={{ fontSize: sz(12), color: T.purple, fontWeight: 600 }}>+¥{(di.amount || 0).toLocaleString()}</span>
+                                  <div key={j} style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 0" }}>
+                                    <div style={{ width: 22, height: 22, borderRadius: 5, background: dic?.bg || "#333", color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: sz(10), fontWeight: 700, flexShrink: 0 }}>{dic?.letter || "?"}</div>
+                                    <span style={{ fontSize: sz(12), color: T.purple, fontWeight: 700 }}>+¥{(di.amount || 0).toLocaleString()}</span>
+                                    {workEditable && (
+                                      <button onClick={() => setHistIncEdit({ date: log.date, index: j, company: di.company, amount: String(di.amount || ""), time: di.time || Date.now(), error: null })} style={{ marginLeft: "auto", background: "none", border: `1px solid ${T.borderLight}`, borderRadius: 6, color: T.textMuted, padding: "2px 7px", fontSize: sz(10), cursor: "pointer", fontFamily: FN }}>修正</button>
+                                    )}
                                   </div>
                                 );
                               })}
+                              {histIncEdit?.date === log.date && (
+                                <div style={{ background: T.barBg, borderRadius: 9, padding: "8px 9px", marginTop: 6, border: `1px solid ${T.border}` }}>
+                                  <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginBottom: 7 }}>
+                                    {COS.map(cc => (
+                                      <button key={cc.id} onClick={() => setHistIncEdit(v => ({ ...v, company: cc.id, error: null }))} style={{ width: 31, height: 31, borderRadius: 8, border: histIncEdit.company === cc.id ? `2px solid ${T.text}` : `1px solid ${T.borderLight}`, background: cc.bg, color: "#FFF", fontSize: sz(12), fontWeight: 800, cursor: "pointer", fontFamily: FN }}>{cc.letter}</button>
+                                    ))}
+                                  </div>
+                                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                    <span style={{ fontSize: sz(13), color: T.purple, fontWeight: 800 }}>¥</span>
+                                    <input type="number" inputMode="numeric" min="0" value={histIncEdit.amount} onChange={(e) => setHistIncEdit(v => ({ ...v, amount: e.target.value, error: null }))} style={{ flex: 1, minWidth: 0, background: T.inputBg, border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.text, fontSize: sz(14), fontWeight: 700, padding: "6px 8px", fontFamily: FN, textAlign: "right" }} />
+                                    <button onClick={saveHistIncEdit} style={{ background: T.purple, border: "none", borderRadius: 7, color: "#FFF", padding: "6px 10px", fontSize: sz(11), fontWeight: 700, cursor: "pointer", fontFamily: FN }}>保存</button>
+                                  </div>
+                                  {histIncEdit.error && <div style={{ fontSize: sz(10), color: "#EF4444", marginTop: 5 }}>{histIncEdit.error}</div>}
+                                  <div style={{ display: "flex", gap: 8, marginTop: 7 }}>
+                                    {histIncEdit.index != null && <button onClick={deleteHistIncEdit} style={{ background: "none", border: `1px solid #EF444466`, borderRadius: 7, color: "#EF4444", padding: "4px 9px", fontSize: sz(10), cursor: "pointer", fontFamily: FN }}>削除</button>}
+                                    <button onClick={() => setHistIncEdit(null)} style={{ background: "none", border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.textMuted, padding: "4px 9px", fontSize: sz(10), cursor: "pointer", fontFamily: FN }}>キャンセル</button>
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           )}
                         </div>
@@ -3532,7 +4803,8 @@ export default function App() {
   }
 
   // ═══ MAIN ═══
-  const stTx = isOn ? (isBrk ? "休憩中" : isJz ? "地蔵中" : hasOrd ? "配達中" : "待機中") : hasWrk ? "オフライン" : "未開始";
+  const orderStatus = hasOrd ? (!hasStoreArrived ? "店舗へ移動中" : !hasStoreDeparted ? "店舗待機中" : "配達中") : null;
+  const stTx = isOn ? (isBrk ? "休憩中" : isJz ? "地蔵中" : orderStatus || "待機中") : hasWrk ? "オフライン" : "未開始";
   const stCo = isOn ? (isJz ? "#F59E0B" : "#22C55E") : hasWrk ? "#F59E0B" : T.textDim;
 
   return (
@@ -3717,6 +4989,11 @@ export default function App() {
                     {gPct}%
                   </div>
                 </div>
+                {/* Today's income */}
+                <div style={{ background: T.inputBg, borderRadius: 10, padding: "10px 14px", marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={{ fontSize: sz(11), color: T.textMuted, fontWeight: 600 }}>本日の収入</div>
+                  <div style={{ fontSize: sz(20), fontWeight: 800, color: T.accent }}>¥{totAll.toLocaleString()}</div>
+                </div>
                 {/* Progress bar */}
                 <div style={{ height: 10, background: T.barBg, borderRadius: 5, overflow: "hidden", marginBottom: 8 }}>
                   <div style={{ height: "100%", width: `${Math.min(gPct, 100)}%`, borderRadius: 5, background: barColor, transition: "width 0.5s ease-out" }} />
@@ -3847,6 +5124,7 @@ export default function App() {
                     <span style={{ fontSize: sz(16), fontWeight: 800, color: T.accent }}>¥{pacePredict.predicted.toLocaleString()}</span>
                     {pacePredict.pctOfGoal > 0 && <span style={{ fontSize: sz(10), color: pacePredict.pctOfGoal >= 100 ? "#22C55E" : T.textDim }}>目標比{pacePredict.pctOfGoal}%</span>}
                   </div>
+                  <div style={{ fontSize: sz(10), color: T.textDim }}>平均オンライン{fd(pacePredict.avgDuration)}想定、{pacePredict.endLabel}まで</div>
                 </div>
               </div>
             )}
@@ -3956,7 +5234,7 @@ export default function App() {
                   const durMin = dur > 0 ? dur / 60000 : 0;
                   const perMin = durMin > 0 ? Math.round((d.reward || 0) / durMin) : 0;
                   return (
-                    <div key={i} onClick={() => { const canEdit = d.completeTime && (Date.now() - d.completeTime) <= 3600000; if (canEdit) openEdit(ri); }} style={{ display: "flex", alignItems: "center", gap: 0, padding: "7px 0", borderBottom: i < data.deliveries.length - 1 ? `1px solid ${T.border}` : "none", cursor: "pointer", opacity: d.completeTime && (Date.now() - d.completeTime) > 3600000 ? 0.6 : 1 }}>
+                    <div key={i} onClick={() => { const canEdit = d.completeTime && (Date.now() - d.completeTime) <= 7200000 && new Date(d.completeTime).toDateString() === new Date().toDateString(); if (canEdit) openEdit(ri); }} style={{ display: "flex", alignItems: "center", gap: 0, padding: "7px 0", borderBottom: i < data.deliveries.length - 1 ? `1px solid ${T.border}` : "none", cursor: "pointer", opacity: d.completeTime && ((Date.now() - d.completeTime) > 7200000 || new Date(d.completeTime).toDateString() !== new Date().toDateString()) ? 0.6 : 1 }}>
                       <div style={{ width: 30, height: 30, borderRadius: 8, background: d.cancelled ? T.textFaint : (c?.bg || "#333"), color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: sz(15), fontWeight: 700, flexShrink: 0, marginRight: 8 }}>{c?.letter || "?"}</div>
                       <div style={{ flex: 1, minWidth: 0, marginRight: 6 }}>
                         {d.cancelled ? <div style={{ fontSize: sz(12), color: "#EF4444", fontWeight: 600 }}>キャンセル</div> : (
@@ -3988,8 +5266,17 @@ export default function App() {
 
       {/* Fixed bottom */}
       <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, maxWidth: 430, margin: "0 auto", padding: "10px 16px 18px", background: `linear-gradient(transparent, ${T.bg} 30%)`, display: "flex", gap: 8, zIndex: 50 }}>
-        <button style={flashBtn("#0EA5E9", !isOn || isBrk || hasOrd, BBH, "order")} onClick={doOrd} disabled={!isOn || isBrk || hasOrd}>受注</button>
-        <button style={flashBtn("#F59E0B", !hasOrd, BBH, "complete")} onClick={doCmp} disabled={!hasOrd}>配達完了</button>
+        {!hasOrd ? (
+          <button style={flashBtn("#0EA5E9", !isOn || isBrk, BBH, "order")} onClick={doOrd} disabled={!isOn || isBrk}>受注</button>
+        ) : !hasStoreArrived ? (<>
+          <button style={flashBtn("#0EA5E9", false, BBH, "storeArrive")} onClick={doStoreArrive}>店舗到着</button>
+          <button style={btn("#EF4444", false, BBH)} onClick={() => openCancel("before_store")}>未到着キャンセル</button>
+        </>) : !hasStoreDeparted ? (<>
+          <button style={flashBtn("#F59E0B", false, BBH, "storeDepart")} onClick={doStoreDepart}>店舗出発</button>
+          <button style={btn("#EF4444", false, BBH)} onClick={() => openCancel("store_wait")}>調理待ちキャンセル</button>
+        </>) : (
+          <button style={flashBtn("#F59E0B", false, BBH, "complete")} onClick={doCmp}>配達完了</button>
+        )}
       </div>
     </div>
   );

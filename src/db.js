@@ -22,31 +22,68 @@ db.version(1).stores({
   // sessions: '++id, date',
 });
 
+// Ensure database is open before any operation
+let dbReady = null;
+export const ensureDB = () => {
+  if (!dbReady) {
+    dbReady = db.open().catch(err => {
+      console.error('[DB] Failed to open IndexedDB:', err);
+      dbReady = null;
+      throw err;
+    });
+  }
+  return dbReady;
+};
+
 // ─── API compatible with window.storage ───
 
 export const storage = {
   async get(key) {
-    const row = await db.store.get(key);
-    return row ? { key: row.key, value: row.value } : null;
+    await ensureDB();
+    try {
+      const row = await db.store.get(key);
+      return row ? { key: row.key, value: row.value } : null;
+    } catch (err) {
+      console.error('[DB] get failed:', key, err);
+      return null;
+    }
   },
 
   async set(key, value) {
-    await db.store.put({ key, value });
-    return { key, value };
+    await ensureDB();
+    try {
+      await db.store.put({ key, value });
+      return { key, value };
+    } catch (err) {
+      console.error('[DB] set failed:', key, err);
+      throw err;
+    }
   },
 
   async delete(key) {
-    await db.store.delete(key);
-    return { key, deleted: true };
+    await ensureDB();
+    try {
+      await db.store.delete(key);
+      return { key, deleted: true };
+    } catch (err) {
+      console.error('[DB] delete failed:', key, err);
+      throw err;
+    }
   },
 
   async list(prefix) {
-    if (prefix) {
-      const keys = await db.store.where('key').startsWith(prefix).primaryKeys();
-      return { keys, prefix };
+    await ensureDB();
+    try {
+      if (prefix) {
+        const keys = await db.store.where('key').startsWith(prefix).primaryKeys();
+        return { keys, prefix };
+      }
+      const keys = await db.store.toCollection().primaryKeys();
+      return { keys };
+    } catch (err) {
+      console.error('[DB] list failed:', prefix, err);
+      return { keys: [] };
     }
-    const keys = await db.store.toCollection().primaryKeys();
-    return { keys };
   },
 };
 
