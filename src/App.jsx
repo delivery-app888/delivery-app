@@ -472,9 +472,9 @@ export default function App() {
     const fT = (t2) => { if (!t2) return ""; const dt2 = new Date(t2); return `${dt2.getHours()}:${String(dt2.getMinutes()).padStart(2, "0")}`; };
     filt.forEach(d2 => {
       const c = d2.cancelled ? RC.cancelled : RC[d2.rating] || RC.normal;
-      const co2 = d2.company || "不明";
+      const co2 = escHtml(d2.company || "不明");
       const rw2 = d2.cancelled ? (d2.cancelType === "before_store" ? "未到着キャンセル" : "調理待ちキャンセル") : `¥${(d2.reward || 0).toLocaleString()}`;
-      const wInfo = d2.apiWeather ? `<br/>${d2.apiWeather.temperature}℃ 風${d2.apiWeather.windspeed}km/h${d2.apiWeather.precipitation != null ? ` 雨${d2.apiWeather.precipitation}mm` : ""}` : "";
+      const wInfo = d2.apiWeather ? `<br/>${escHtml(d2.apiWeather.temperature)}℃ 風${escHtml(d2.apiWeather.windspeed)}km/h${d2.apiWeather.precipitation != null ? ` 雨${escHtml(d2.apiWeather.precipitation)}mm` : ""}` : "";
       if (d2.startLat && d2.startLng) L.circleMarker([d2.startLat, d2.startLng], { radius: 6, color: c, fillColor: c, fillOpacity: 0.7, weight: 2 }).bindPopup(`<b>受注</b> ${fT(d2.orderTime)}<br/>${co2} ${rw2}${wInfo}`).addTo(hmLayerRef.current);
     });
     setHmPinCount(filt.length);
@@ -560,7 +560,7 @@ export default function App() {
     const waitColor = (min, cancelled) => cancelled ? "#EF4444" : min >= 15 ? "#EF4444" : min >= 10 ? "#F59E0B" : "#A855F7";
     filt.forEach(d2 => {
       const color = waitColor(d2._waitMin, d2.cancelled);
-      const co2 = COS.find(c => c.id === d2.company)?.name || d2.company || "不明";
+      const co2 = escHtml(COS.find(c => c.id === d2.company)?.name || d2.company || "不明");
       const label = d2.cancelled ? "調理待ちキャンセル" : `店舗待機 ${d2._waitMin}分`;
       const rw2 = d2.cancelled ? "" : `<br/>報酬 ¥${(d2.reward || 0).toLocaleString()}`;
       L.circleMarker([d2.storeLat, d2.storeLng], { radius: 9, color, fillColor: color, fillOpacity: 0.85, weight: 2 }).bindPopup(`<b>店舗</b> ${fT(d2.storeArrivalTime)}<br/>${co2}<br/>${label}${rw2}`).addTo(swLayerRef.current);
@@ -622,7 +622,7 @@ export default function App() {
         if (perMin >= tier.min && perMin < tier.max) {
           const co = COS.find(cc => cc.id === d2.company);
           const marker = L.circleMarker([d2.startLat, d2.startLng], { radius: tier.radius, color: tier.color, fillColor: tier.color, fillOpacity: 0.75, weight: 2 })
-            .bindPopup(`<b>¥${Math.round(perMin)}/分</b><br/>${escHtml(co?.name || "不明")} ¥${(d2.reward || 0).toLocaleString()}<br/>${fT(d2.orderTime)} (${Math.round(durMin)}分)<br/>${d2._date}<br/><span style="color:#888">📝 ${d2.memo ? escHtml(d2.memo) : 'メモなし'}</span>`)
+            .bindPopup(`<b>¥${Math.round(perMin)}/分</b><br/>${escHtml(co?.name || "不明")} ¥${(d2.reward || 0).toLocaleString()}<br/>${fT(d2.orderTime)} (${Math.round(durMin)}分)<br/>${escHtml(d2._date)}<br/><span style="color:#888">📝 ${d2.memo ? escHtml(d2.memo) : 'メモなし'}</span>`)
             .addTo(hvLayerRef.current);
           marker.on("click", () => {
             const isToday = d2._date === tds();

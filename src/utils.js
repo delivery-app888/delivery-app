@@ -30,6 +30,12 @@ export const getPos = () => new Promise((resolve) => {
   );
 });
 
+// Keep exact GPS local; round coordinates before external API calls.
+const publicCoord = (value) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? Number(n.toFixed(3)) : value;
+};
+
 // ─── Open-Meteo weather API ───
 export const wmoToWeather = (code) => {
   if (code <= 1) return "sunny";
@@ -46,7 +52,12 @@ export const wmoToWeather = (code) => {
 };
 export const fetchWeather = async (lat, lng) => {
   try {
-    const res = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&current_weather=true&current=precipitation`);
+    const safeLat = publicCoord(lat);
+    const safeLng = publicCoord(lng);
+    const res = await fetch(
+      `https://api.open-meteo.com/v1/forecast?latitude=${safeLat}&longitude=${safeLng}&current_weather=true&current=precipitation`,
+      { cache: "no-store", referrerPolicy: "no-referrer" }
+    );
     if (!res.ok) return null;
     const json = await res.json();
     const cw = json.current_weather;
@@ -109,9 +120,11 @@ export const reverseGeocode = async (lat, lng) => {
   if (wait > 0) await new Promise(r => setTimeout(r, wait));
   lastGeoReq = Date.now();
   try {
+    const safeLat = publicCoord(lat);
+    const safeLng = publicCoord(lng);
     const res = await fetch(
-      `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&zoom=16&accept-language=ja`,
-      { headers: { 'User-Agent': 'DeliveryLogApp/1.0' } }
+      `https://nominatim.openstreetmap.org/reverse?lat=${safeLat}&lon=${safeLng}&format=json&zoom=16&accept-language=ja`,
+      { cache: "no-store", referrerPolicy: "no-referrer", headers: { 'User-Agent': 'DeliveryLogApp/1.0' } }
     );
     if (!res.ok) return null;
     const json = await res.json();
