@@ -179,6 +179,7 @@ export default function App() {
   const [histWorkEdit, setHistWorkEdit] = useState(null);
   const [histIncEdit, setHistIncEdit] = useState(null);
   const [actionToast, setActionToast] = useState(null);
+  const [csvExport, setCsvExport] = useState(null);
 
 
   const T = settings.theme === "light" ? LIGHT : DARK;
@@ -193,6 +194,7 @@ export default function App() {
       deliveries: [...(log.deliveries || [])],
       dailyIncentives: [...(log.dailyIncentives || [])],
       weatherSamples: [...(log.weatherSamples || [])],
+      currentStops: (log.currentStops || []).map(s => ({ ...s })),
     };
     const end = Math.max(next.currentSessionStart || endTs, endTs);
     if (next.currentBreakStart && end > next.currentBreakStart) next.breaks.push({ start: next.currentBreakStart, end });
@@ -249,6 +251,8 @@ export default function App() {
           newDayData.currentStoreDepartTime = prev.currentStoreDepartTime || null;
           newDayData.currentStorePos = prev.currentStorePos || null;
           newDayData.currentStoreWeather = prev.currentStoreWeather || null;
+          newDayData.currentOrderType = prev.currentOrderType || null;
+          newDayData.currentStops = (prev.currentStops || []).map(s => ({ ...s }));
           return newDayData;
         });
       }
@@ -303,6 +307,8 @@ export default function App() {
           todaySaved.currentStoreDepartTime = activeLog.currentStoreDepartTime || null;
           todaySaved.currentStorePos = activeLog.currentStorePos || null;
           todaySaved.currentStoreWeather = activeLog.currentStoreWeather || null;
+          todaySaved.currentOrderType = activeLog.currentOrderType || null;
+          todaySaved.currentStops = (activeLog.currentStops || []).map(s => ({ ...s }));
         }
         if (cutoff && Date.now() >= cutoff && !todaySaved.currentOrderTime) setData(migrate(closeActiveLogAt(todaySaved, cutoff)));
         else setData(migrate(todaySaved));
@@ -318,7 +324,7 @@ export default function App() {
 
   const saveRef = useRef(null);
   useEffect(() => { if (loading) return; if (saveRef.current) clearTimeout(saveRef.current); saveRef.current = setTimeout(() => sv(data), 300); }, [data, loading]);
-  const update = useCallback((fn) => { setData(p => { const n = { ...p, sessions: [...p.sessions], breaks: [...p.breaks], deliveries: [...p.deliveries], dailyIncentives: [...p.dailyIncentives], jizoSessions: [...p.jizoSessions], weatherSamples: [...(p.weatherSamples || [])] }; fn(n); return n; }); }, []);
+  const update = useCallback((fn) => { setData(p => { const n = { ...p, sessions: [...p.sessions], breaks: [...p.breaks], deliveries: [...p.deliveries], dailyIncentives: [...p.dailyIncentives], jizoSessions: [...p.jizoSessions], weatherSamples: [...(p.weatherSamples || [])], currentStops: (p.currentStops || []).map(s => ({ ...s })) }; fn(n); return n; }); }, []);
   const updateSettings = (patch) => { const n = { ...settings, ...patch }; setSettings(n); ss(n); };
   const runAutoOfflineCheck = useCallback(() => {
     const limitMs = autoOfflineMsFor(settings);
@@ -515,9 +521,25 @@ export default function App() {
     const todayStr2 = tds();
     const nowMs2 = Date.now();
     const msDay2 = 86400000;
+    const storeWaitEntries = (d2, date) => {
+      const pickupStops = (d2.stops || []).filter(s => s.kind === "pickup" && s.arrivalTime && (s.lat || d2.storeLat) && (s.lng || d2.storeLng));
+      if (pickupStops.length > 0) {
+        return pickupStops.map(s => ({
+          ...d2,
+          _date: date,
+          _stopLabel: s.label || "店舗",
+          storeArrivalTime: s.arrivalTime,
+          storeDepartTime: s.departTime || null,
+          storeLat: s.lat || d2.storeLat,
+          storeLng: s.lng || d2.storeLng,
+          storeWeather: s.weather || d2.storeWeather,
+        }));
+      }
+      return d2.storeLat && d2.storeLng && d2.storeArrivalTime ? [{ ...d2, _date: date, _stopLabel: "店舗" }] : [];
+    };
     const allWaits = [
-      ...allLogs.flatMap(l2 => (l2.deliveries || []).filter(d2 => d2.storeLat && d2.storeLng && d2.storeArrivalTime).map(d2 => ({ ...d2, _date: l2.date }))),
-      ...data.deliveries.filter(d2 => d2.storeLat && d2.storeLng && d2.storeArrivalTime).map(d2 => ({ ...d2, _date: data.date })),
+      ...allLogs.flatMap(l2 => (l2.deliveries || []).flatMap(d2 => storeWaitEntries(d2, l2.date))),
+      ...data.deliveries.flatMap(d2 => storeWaitEntries(d2, data.date)),
     ].map(d2 => {
       const waitMs = Math.max(0, (d2.storeDepartTime || d2.completeTime || nowMs2) - d2.storeArrivalTime);
       return { ...d2, _waitMs: waitMs, _waitMin: Math.round(waitMs / 60000) };
@@ -561,7 +583,7 @@ export default function App() {
     filt.forEach(d2 => {
       const color = waitColor(d2._waitMin, d2.cancelled);
       const co2 = escHtml(COS.find(c => c.id === d2.company)?.name || d2.company || "不明");
-      const label = d2.cancelled ? "調理待ちキャンセル" : `店舗待機 ${d2._waitMin}分`;
+      const label = d2.cancelled ? "調理待ちキャンセル" : `${d2._stopLabel || "店舗"}待機 ${d2._waitMin}分`;
       const rw2 = d2.cancelled ? "" : `<br/>報酬 ¥${(d2.reward || 0).toLocaleString()}`;
       L.circleMarker([d2.storeLat, d2.storeLng], { radius: 9, color, fillColor: color, fillOpacity: 0.85, weight: 2 }).bindPopup(`<b>店舗</b> ${fT(d2.storeArrivalTime)}<br/>${co2}<br/>${label}${rw2}`).addTo(swLayerRef.current);
     });
@@ -818,8 +840,67 @@ export default function App() {
     return () => { cancelled = true; setAaGeoProgress(null); };
   }, [screen]);
 
+  const orderTypeCount = (type) => type === "triple" ? 3 : type === "double" ? 2 : 1;
+  const orderTypeFromCount = (count) => count >= 3 ? "triple" : count >= 2 ? "double" : "single";
+  const buildPickupStops = (count = 1) => {
+    return [
+      ...Array.from({ length: count }, (_, i) => ({
+        id: `pickup-${i + 1}`, kind: "pickup", index: i + 1,
+        label: count === 1 ? "店舗" : `店舗${i + 1}`,
+        arrivalTime: null, departTime: null, lat: null, lng: null, weather: null,
+      })),
+    ];
+  };
+  const buildDropoffStops = (count = 1) => (
+    Array.from({ length: count }, (_, i) => ({
+        id: `dropoff-${i + 1}`, kind: "dropoff", index: i + 1,
+        label: count === 1 ? "配達" : `配達${i + 1}`,
+        completeTime: null, lat: null, lng: null,
+      }))
+  );
+  const getNextOrderStep = (stops) => {
+    const list = Array.isArray(stops) ? stops : [];
+    for (const stop of list) {
+      if (stop.kind === "pickup") {
+        if (!stop.arrivalTime) return { action: "pickup_arrive", stop };
+        if (!stop.departTime) return { action: "pickup_depart", stop };
+      }
+      if (stop.kind === "dropoff" && !stop.completeTime) return { action: "dropoff_complete", stop };
+    }
+    const pickupCount = list.filter(s => s.kind === "pickup").length;
+    const dropoffCount = list.filter(s => s.kind === "dropoff").length;
+    if (pickupCount > 0 && dropoffCount === 0) return { action: "choose_route", stop: null };
+    return list.length > 0 ? { action: "reward", stop: null } : null;
+  };
+  const stepButtonLabel = (step, type) => {
+    if (!step) return "";
+    const multi = orderTypeCount(type) > 1;
+    const idx = step.stop?.index || 1;
+    if (step.action === "pickup_arrive") return multi ? `店舗${idx}到着` : "店舗到着";
+    if (step.action === "pickup_depart") return multi ? `店舗${idx}出発` : "店舗出発";
+    if (step.action === "dropoff_complete") return multi ? `${idx}件目配達完了` : "配達完了";
+    if (step.action === "choose_route") return "次の行き先を選択";
+    return "報酬入力へ";
+  };
+  const stepStatusLabel = (step, type) => {
+    if (!step) return "配達中";
+    const multi = orderTypeCount(type) > 1;
+    const idx = step.stop?.index || 1;
+    if (step.action === "pickup_arrive") return multi ? `店舗${idx}へ移動中` : "店舗へ移動中";
+    if (step.action === "pickup_depart") return multi ? `店舗${idx}待機中` : "店舗待機中";
+    if (step.action === "dropoff_complete") return multi ? `${idx}件目へ配達中` : "配達中";
+    if (step.action === "choose_route") return "次の行き先を選択";
+    return "報酬入力待ち";
+  };
+  const sanitizeStops = (stops) => (Array.isArray(stops) ? stops : []).map(s => ({ ...s }));
+  const firstPickupStop = (stops) => sanitizeStops(stops).find(s => s.kind === "pickup") || null;
+  const lastCompletedDropoffStop = (stops) => [...sanitizeStops(stops)].reverse().find(s => s.kind === "dropoff" && s.completeTime) || null;
+
   // ─── Computed ───
   const isOn = !!data.currentSessionStart; const isBrk = !!data.currentBreakStart; const hasOrd = !!data.currentOrderTime; const isJz = !!data.currentJizoStart;
+  const currentOrderType = data.currentOrderType || "single";
+  const currentOrderStops = sanitizeStops(data.currentStops);
+  const currentOrderStep = hasOrd ? getNextOrderStep(currentOrderStops) : null;
   const hasStoreArrived = !!data.currentStoreArrivalTime;
   const hasStoreDeparted = !!data.currentStoreDepartTime;
   const hasWrk = data.sessions.length > 0 || isOn;
@@ -944,7 +1025,7 @@ export default function App() {
     const level = max == null ? "未取得" : max === 0 ? "雨なし" : max <= 2 ? "小雨" : max <= 5 ? "雨" : "大雨";
     return { samples: samples.length, rainy, max, avg, level };
   };
-  const downloadCsvText = () => {
+  const downloadCsvText = async () => {
     const logsByDate = new Map();
     allLogs.forEach(l => { if (l?.date) logsByDate.set(l.date, l); });
     if (data?.date) logsByDate.set(data.date, data);
@@ -954,7 +1035,7 @@ export default function App() {
       return;
     }
     const columns = [
-      "record_type", "date", "index", "company", "company_name", "order_type", "cancelled", "cancel_type", "rating", "manual_weather",
+      "record_type", "date", "index", "stop_index", "stop_type", "stop_label", "company", "company_name", "order_type", "cancelled", "cancel_type", "rating", "manual_weather",
       "start_time", "end_time", "order_time", "store_arrival_time", "store_depart_time", "complete_time",
       "duration_minutes", "online_minutes", "break_minutes", "jizo_minutes", "work_minutes", "delivery_count",
       "raw_reward", "reward", "incentive", "total_amount", "per_min", "rocket_bonus_rate",
@@ -1035,6 +1116,22 @@ export default function App() {
           weather_source: d.apiWeather ? "order" : "", api_weather_id: d.apiWeather?.weatherId || "", temperature: d.apiWeather?.temperature ?? "", windspeed: d.apiWeather?.windspeed ?? "",
           precipitation: d.apiWeather?.precipitation ?? "", area_name: d.areaName || "", memo: d.memo || "",
         });
+        (d.stops || []).forEach((stop, stopIdx) => {
+          const stopStart = stop.kind === "pickup" ? stop.arrivalTime : null;
+          const stopEnd = stop.kind === "pickup" ? stop.departTime : stop.completeTime;
+          pushRow({
+            record_type: "delivery_stop", date: log.date, index: i + 1, stop_index: stopIdx + 1,
+            stop_type: stop.kind || "", stop_label: stop.label || "",
+            company: d.company, company_name: companyName(d.company), order_type: d.orderType || "single",
+            start_time: fmtDateTime(stopStart), end_time: fmtDateTime(stopEnd),
+            duration_minutes: stop.kind === "pickup" && stopStart && stopEnd ? roundMin(stopEnd - stopStart) : "",
+            store_lat: stop.kind === "pickup" ? stop.lat : "", store_lng: stop.kind === "pickup" ? stop.lng : "",
+            end_lat: stop.kind === "dropoff" ? stop.lat : "", end_lng: stop.kind === "dropoff" ? stop.lng : "",
+            weather_source: stop.kind === "pickup" && stop.weather ? "store" : "",
+            api_weather_id: stop.weather?.weatherId || "", temperature: stop.weather?.temperature ?? "", windspeed: stop.weather?.windspeed ?? "",
+            precipitation: stop.weather?.precipitation ?? "",
+          });
+        });
       });
       dailyIncentives.forEach((di, i) => pushRow({
         record_type: "daily_incentive", date: log.date, index: i + 1, company: di.company, company_name: companyName(di.company),
@@ -1043,18 +1140,37 @@ export default function App() {
     });
 
     const csv = [columns.join(","), ...rows.map(row => columns.map(c => csvCell(row[c])).join(","))].join("\n");
-    const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
     const stamp = fmtDateTime(Date.now()).replace(/[-: ]/g, "");
-    a.href = url;
-    a.download = `delivery-log-${stamp}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    setActionToast("✓ CSVを保存しました");
-    setTimeout(() => setActionToast(null), 1600);
+    const filename = `delivery-log-${stamp}.csv`;
+    const csvText = "\uFEFF" + csv;
+    setCsvExport({ filename, csv });
+
+    try {
+      const file = new File([csvText], filename, { type: "text/csv;charset=utf-8" });
+      if (navigator.canShare?.({ files: [file] })) {
+        await navigator.share({ files: [file], title: "配達ログCSV" });
+        setActionToast("✓ CSV共有を開きました");
+        setTimeout(() => setActionToast(null), 1600);
+        return;
+      }
+    } catch {}
+
+    try {
+      const blob = new Blob([csvText], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.rel = "noopener";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      setActionToast("✓ CSVを保存しました");
+      setTimeout(() => setActionToast(null), 1600);
+    } catch {
+      setPopup({ msg: "CSVの自動保存に失敗しました。\n設定画面下部のCSVテキストからコピーしてください。", onConfirm: () => setPopup(null) });
+    }
   };
 
   const timeInputValue = (ts) => {
@@ -1465,6 +1581,10 @@ export default function App() {
   };
   const doOffline = () => {
     if (!isOn) return;
+    if (hasOrd) {
+      setPopup({ msg: "配達中です。\n先に配達完了またはキャンセルを記録してください。", onConfirm: () => setPopup(null) });
+      return;
+    }
     setPopup({
       msg: "本日の稼働を終了しますか？\n\n休憩の場合は「休憩開始」を\n使ってください。",
       onConfirm: () => {
@@ -1526,6 +1646,14 @@ export default function App() {
     if (isJz) update(d => { d.jizoSessions.push({ start: d.currentJizoStart, end: Date.now() }); d.currentJizoStart = null; });
     else update(d => { d.currentJizoStart = Date.now(); });
   };
+  const clearCurrentOrder = (d) => {
+    d.currentOrderTime = null; d.currentOrderPos = null; d.currentOrderWeather = null;
+    d.currentStoreArrivalTime = null; d.currentStoreDepartTime = null; d.currentStorePos = null; d.currentStoreWeather = null;
+    d.currentOrderType = null; d.currentStops = [];
+  };
+  const openRewardInput = () => {
+    setRwCo(null); setRwAmt(""); setRwInc(""); setRwField("reward"); setRwType(data.currentOrderType || "single"); setRwRating(null); setScreen("reward"); pulse("complete");
+  };
   const doOrd = () => {
     if (!isOn || isBrk || hasOrd) return;
     if (isJz) update(d => { d.jizoSessions.push({ start: d.currentJizoStart, end: Date.now() }); d.currentJizoStart = null; });
@@ -1533,36 +1661,120 @@ export default function App() {
       d.currentOrderTime = Date.now();
       d.currentOrderPos = null; d.currentOrderWeather = null;
       d.currentStoreArrivalTime = null; d.currentStoreDepartTime = null; d.currentStorePos = null; d.currentStoreWeather = null;
+      d.currentOrderType = "single";
+      d.currentStops = buildPickupStops(1);
     });
     getPos().then(p => { if (p) { update(d => { d.currentOrderPos = p; }); fetchWeather(p.lat, p.lng).then(w => { if (w) update(d => { d.currentOrderWeather = w; d.weatherSamples.push(makeWeatherSample("order", p, w)); }); }); } });
     pulse("order");
   };
   const doStoreArrive = () => {
-    if (!hasOrd || hasStoreArrived) return;
-    update(d => { d.currentStoreArrivalTime = Date.now(); });
+    const step = getNextOrderStep(data.currentStops || []);
+    if (!hasOrd || (step && step.action !== "pickup_arrive") || (!step && hasStoreArrived)) return;
+    const targetId = step?.stop?.id || "pickup-1";
+    const isFirst = !step || step.stop?.index === 1;
+    const nowArrive = Date.now();
+    update(d => {
+      d.currentStops = (d.currentStops || []).map(s => s.id === targetId ? { ...s, arrivalTime: nowArrive } : s);
+      if (isFirst) d.currentStoreArrivalTime = nowArrive;
+    });
     getPos().then(p => {
       if (p) {
-        update(d => { d.currentStorePos = p; });
-        fetchWeather(p.lat, p.lng).then(w => { if (w) update(d => { d.currentStoreWeather = w; d.weatherSamples.push(makeWeatherSample("store", p, w)); }); });
+        update(d => {
+          d.currentStops = (d.currentStops || []).map(s => s.id === targetId ? { ...s, lat: p.lat, lng: p.lng } : s);
+          if (isFirst) d.currentStorePos = p;
+        });
+        fetchWeather(p.lat, p.lng).then(w => {
+          if (w) update(d => {
+            d.currentStops = (d.currentStops || []).map(s => s.id === targetId ? { ...s, weather: w } : s);
+            if (isFirst) d.currentStoreWeather = w;
+            d.weatherSamples.push(makeWeatherSample(`store_${step?.stop?.index || 1}`, p, w));
+          });
+        });
       }
     });
     pulse("storeArrive");
   };
   const doStoreDepart = () => {
-    if (!hasOrd || !hasStoreArrived || hasStoreDeparted) return;
-    update(d => { d.currentStoreDepartTime = Date.now(); });
-    if (!data.currentStorePos) {
-      getPos().then(p => { if (p) { update(d => { d.currentStorePos = p; }); fetchWeather(p.lat, p.lng).then(w => { if (w) update(d => { d.currentStoreWeather = w; d.weatherSamples.push(makeWeatherSample("store_depart", p, w)); }); }); } });
+    const step = getNextOrderStep(data.currentStops || []);
+    if (!hasOrd || (step && step.action !== "pickup_depart") || (!step && (!hasStoreArrived || hasStoreDeparted))) return;
+    const targetId = step?.stop?.id || "pickup-1";
+    const isFirst = !step || step.stop?.index === 1;
+    const nowDepart = Date.now();
+    update(d => {
+      d.currentStops = (d.currentStops || []).map(s => s.id === targetId ? { ...s, departTime: nowDepart } : s);
+      if (isFirst) d.currentStoreDepartTime = nowDepart;
+    });
+    if (!step?.stop?.lat && (!isFirst || !data.currentStorePos)) {
+      getPos().then(p => { if (p) { update(d => { d.currentStops = (d.currentStops || []).map(s => s.id === targetId ? { ...s, lat: s.lat || p.lat, lng: s.lng || p.lng } : s); if (isFirst) d.currentStorePos = d.currentStorePos || p; }); fetchWeather(p.lat, p.lng).then(w => { if (w) update(d => { d.currentStops = (d.currentStops || []).map(s => s.id === targetId ? { ...s, weather: s.weather || w } : s); if (isFirst) d.currentStoreWeather = d.currentStoreWeather || w; d.weatherSamples.push(makeWeatherSample(`store_depart_${step?.stop?.index || 1}`, p, w)); }); }); } });
     }
     pulse("storeDepart");
   };
+  const doNextStore = () => {
+    const step = getNextOrderStep(data.currentStops || []);
+    if (!hasOrd || step?.action !== "choose_route") return;
+    const pickups = (data.currentStops || []).filter(s => s.kind === "pickup");
+    if (pickups.length >= 3) return;
+    const nextCount = pickups.length + 1;
+    update(d => {
+      const relabeled = (d.currentStops || []).filter(s => s.kind === "pickup").map((s, i) => ({
+        ...s,
+        index: i + 1,
+        label: `店舗${i + 1}`,
+      }));
+      relabeled.push({ id: `pickup-${nextCount}`, kind: "pickup", index: nextCount, label: `店舗${nextCount}`, arrivalTime: null, departTime: null, lat: null, lng: null, weather: null });
+      d.currentStops = relabeled;
+      d.currentOrderType = orderTypeFromCount(nextCount);
+    });
+    setActionToast(`✓ 店舗${nextCount}へ`);
+    setTimeout(() => setActionToast(null), 1200);
+  };
+  const doStartDeliveryRoute = () => {
+    const step = getNextOrderStep(data.currentStops || []);
+    if (!hasOrd || step?.action !== "choose_route") return;
+    const pickups = (data.currentStops || []).filter(s => s.kind === "pickup");
+    const count = Math.max(1, Math.min(3, pickups.length));
+    update(d => {
+      const relabeledPickups = (d.currentStops || []).filter(s => s.kind === "pickup").map((s, i) => ({
+        ...s,
+        index: i + 1,
+        label: count === 1 ? "店舗" : `店舗${i + 1}`,
+      }));
+      d.currentStops = [...relabeledPickups, ...buildDropoffStops(count)];
+      d.currentOrderType = orderTypeFromCount(count);
+    });
+    setActionToast("✓ 配達へ");
+    setTimeout(() => setActionToast(null), 1200);
+  };
+  const doDropoffComplete = () => {
+    const step = getNextOrderStep(data.currentStops || []);
+    if (!hasOrd || !step || step.action !== "dropoff_complete") return;
+    const targetId = step.stop.id;
+    const isLastDropoff = (data.currentStops || []).filter(s => s.kind === "dropoff").every(s => s.id === targetId || s.completeTime);
+    const nowComplete = Date.now();
+    update(d => {
+      d.currentStops = (d.currentStops || []).map(s => s.id === targetId ? { ...s, completeTime: nowComplete } : s);
+    });
+    getPos().then(p => {
+      if (p) update(d => { d.currentStops = (d.currentStops || []).map(s => s.id === targetId ? { ...s, lat: p.lat, lng: p.lng } : s); });
+    });
+    if (isLastDropoff) openRewardInput();
+    else pulse("complete");
+  };
   const doCmp = () => {
     if (!hasOrd) return;
+    if (currentOrderStep?.action === "dropoff_complete") {
+      doDropoffComplete();
+      return;
+    }
+    if (currentOrderStep?.action === "reward") {
+      openRewardInput();
+      return;
+    }
     if (!hasStoreDeparted) {
       setPopup({ msg: "店舗出発を記録してから\n配達完了に進んでください。", onConfirm: () => setPopup(null) });
       return;
     }
-    setRwCo(null); setRwAmt(""); setRwInc(""); setRwField("reward"); setRwType("single"); setRwRating(null); setScreen("reward"); pulse("complete");
+    openRewardInput();
   };
   const [rwSaving, setRwSaving] = useState(false);
   const openCancel = (type) => {
@@ -1578,19 +1790,22 @@ export default function App() {
       const endPos = await getPos();
       const nowCancel = Date.now();
       const sp = data.currentOrderPos || null;
+      const stops = sanitizeStops(data.currentStops);
+      const firstPickup = firstPickupStop(stops);
       const storePos = data.currentStorePos || (cancelType === "store_wait" ? endPos : null);
       const orderDate = data.currentOrderTime ? toLD(data.currentOrderTime) : tds();
       const isCrossDay = orderDate !== data.date;
       const deliveryObj = {
         orderTime: data.currentOrderTime, completeTime: nowCancel, company: rwCo,
-        reward: 0, incentive: 0, orderType: "single", cancelled: true, cancelType, rating: null,
-        storeArrivalTime: cancelType === "store_wait" ? data.currentStoreArrivalTime : null,
+        reward: 0, incentive: 0, orderType: data.currentOrderType || "single", cancelled: true, cancelType, rating: null,
+        storeArrivalTime: cancelType === "store_wait" ? (data.currentStoreArrivalTime || firstPickup?.arrivalTime || null) : null,
         storeDepartTime: null,
         startLat: sp?.lat || null, startLng: sp?.lng || null,
-        storeLat: storePos?.lat || null, storeLng: storePos?.lng || null,
+        storeLat: storePos?.lat || firstPickup?.lat || null, storeLng: storePos?.lng || firstPickup?.lng || null,
         endLat: endPos?.lat || null, endLng: endPos?.lng || null,
         apiWeather: data.currentOrderWeather || null,
-        storeWeather: data.currentStoreWeather || null,
+        storeWeather: data.currentStoreWeather || firstPickup?.weather || null,
+        stops,
         areaName: null, memo: "",
       };
       if (isCrossDay) {
@@ -1601,14 +1816,12 @@ export default function App() {
           setAllLogs(prev => prev.map(l => l.date === orderDate ? { ...prevLog } : l));
         }
         update(d => {
-          d.currentOrderTime = null; d.currentOrderPos = null; d.currentOrderWeather = null;
-          d.currentStoreArrivalTime = null; d.currentStoreDepartTime = null; d.currentStorePos = null; d.currentStoreWeather = null;
+          clearCurrentOrder(d);
         });
       } else {
         update(d => {
           d.deliveries.push(deliveryObj);
-          d.currentOrderTime = null; d.currentOrderPos = null; d.currentOrderWeather = null;
-          d.currentStoreArrivalTime = null; d.currentStoreDepartTime = null; d.currentStorePos = null; d.currentStoreWeather = null;
+          clearCurrentOrder(d);
         });
       }
       setScreen("main");
@@ -1636,19 +1849,26 @@ export default function App() {
     else if (rew <= avgUnit * 0.8) autoRating = "bad";
     const finalRating = rwRating || autoRating; // manual override or auto
     const endPos = await getPos();
+    const stops = sanitizeStops(data.currentStops);
+    const firstPickup = firstPickupStop(stops);
+    const lastDropoff = lastCompletedDropoffStop(stops);
+    const finalEndLat = lastDropoff?.lat || endPos?.lat || null;
+    const finalEndLng = lastDropoff?.lng || endPos?.lng || null;
+    const completeTs = lastDropoff?.completeTime || Date.now();
     const orderDate = data.currentOrderTime ? toLD(data.currentOrderTime) : tds();
     const isCrossDay = orderDate !== data.date;
     const deliveryObj = {
-      orderTime: data.currentOrderTime, completeTime: Date.now(), company: rwCo,
-      reward: rew, rawReward: isPickgo || (isRocket && rocketBonusRate > 0) ? rawRew : undefined, rocketBonusRate: isRocket ? rocketBonusRate : 0, incentive: inc, orderType: rwType, cancelled: false,
+      orderTime: data.currentOrderTime, completeTime: completeTs, company: rwCo,
+      reward: rew, rawReward: isPickgo || (isRocket && rocketBonusRate > 0) ? rawRew : undefined, rocketBonusRate: isRocket ? rocketBonusRate : 0, incentive: inc, orderType: data.currentOrderType || rwType, cancelled: false,
       rating: finalRating,
-      storeArrivalTime: data.currentStoreArrivalTime || null,
-      storeDepartTime: data.currentStoreDepartTime || null,
+      storeArrivalTime: data.currentStoreArrivalTime || firstPickup?.arrivalTime || null,
+      storeDepartTime: data.currentStoreDepartTime || firstPickup?.departTime || null,
       startLat: data.currentOrderPos?.lat || null, startLng: data.currentOrderPos?.lng || null,
-      storeLat: data.currentStorePos?.lat || null, storeLng: data.currentStorePos?.lng || null,
-      endLat: endPos?.lat || null, endLng: endPos?.lng || null,
+      storeLat: data.currentStorePos?.lat || firstPickup?.lat || null, storeLng: data.currentStorePos?.lng || firstPickup?.lng || null,
+      endLat: finalEndLat, endLng: finalEndLng,
       apiWeather: data.currentOrderWeather || null,
-      storeWeather: data.currentStoreWeather || null,
+      storeWeather: data.currentStoreWeather || firstPickup?.weather || null,
+      stops,
       areaName: null,
     };
     if (isCrossDay) {
@@ -1660,24 +1880,17 @@ export default function App() {
         setAllLogs(prev => prev.map(l => l.date === orderDate ? { ...prevLog } : l));
       }
       update(d => {
-        d.currentOrderTime = null; d.currentOrderPos = null; d.currentOrderWeather = null;
-        d.currentStoreArrivalTime = null; d.currentStoreDepartTime = null; d.currentStorePos = null; d.currentStoreWeather = null;
+        clearCurrentOrder(d);
       });
     } else {
       update(d => {
         d.deliveries.push(deliveryObj);
-        d.currentOrderTime = null;
-        d.currentOrderPos = null;
-        d.currentOrderWeather = null;
-        d.currentStoreArrivalTime = null;
-        d.currentStoreDepartTime = null;
-        d.currentStorePos = null;
-        d.currentStoreWeather = null;
+        clearCurrentOrder(d);
       });
     }
     // Background geocode for area name
-    if (endPos?.lat && endPos?.lng) {
-      reverseGeocode(endPos.lat, endPos.lng).then(name => {
+    if (finalEndLat && finalEndLng) {
+      reverseGeocode(finalEndLat, finalEndLng).then(name => {
         if (name) update(d => { const last = d.deliveries[d.deliveries.length - 1]; if (last && !last.areaName) last.areaName = name; });
       });
     }
@@ -1771,8 +1984,56 @@ export default function App() {
       setTimeout(() => setTodayGuide(null), 4000);
     }
   };
-  const openEdit = (i) => { setEditIdx(i); setEditData({ ...data.deliveries[i] }); setEditField(null); setScreen("edit"); };
-  const svEdit = () => { if (editIdx === null) return; update(d => { d.deliveries[editIdx] = { ...editData }; }); setScreen("main"); };
+  const normalizeDeliverySteps = (delivery) => {
+    const base = { ...delivery };
+    let stops = sanitizeStops(base.stops);
+    if (stops.length === 0) {
+      const count = Math.max(1, orderTypeCount(base.orderType));
+      const pickup = {
+        id: "pickup-1", kind: "pickup", index: 1, label: count === 1 ? "店舗" : "店舗1",
+        arrivalTime: base.storeArrivalTime || null,
+        departTime: base.storeDepartTime || null,
+        lat: base.storeLat || null,
+        lng: base.storeLng || null,
+        weather: base.storeWeather || null,
+      };
+      const dropoffs = buildDropoffStops(count).map((s, i) => ({
+        ...s,
+        completeTime: i === count - 1 ? base.completeTime || null : null,
+        lat: i === count - 1 ? base.endLat || null : null,
+        lng: i === count - 1 ? base.endLng || null : null,
+      }));
+      stops = [pickup, ...dropoffs];
+    }
+    const pickups = stops.filter(s => s.kind === "pickup");
+    const dropoffs = stops.filter(s => s.kind === "dropoff");
+    const count = Math.max(1, Math.min(3, Math.max(pickups.length, dropoffs.length)));
+    const relabeledPickups = pickups.slice(0, 3).map((s, i) => ({ ...s, index: i + 1, label: count === 1 ? "店舗" : `店舗${i + 1}` }));
+    let relabeledDropoffs = dropoffs.slice(0, 3).map((s, i) => ({ ...s, index: i + 1, label: count === 1 ? "配達" : `配達${i + 1}` }));
+    while (relabeledDropoffs.length < count) {
+      const i = relabeledDropoffs.length;
+      relabeledDropoffs.push({ id: `dropoff-${i + 1}`, kind: "dropoff", index: i + 1, label: count === 1 ? "配達" : `配達${i + 1}`, completeTime: null, lat: null, lng: null });
+    }
+    const nextStops = [...relabeledPickups, ...relabeledDropoffs];
+    const firstPickup = relabeledPickups[0] || null;
+    const completedDropoffs = relabeledDropoffs.filter(s => s.completeTime);
+    const lastDropoff = completedDropoffs[completedDropoffs.length - 1] || relabeledDropoffs[relabeledDropoffs.length - 1] || null;
+    return {
+      ...base,
+      orderType: orderTypeFromCount(count),
+      stops: nextStops,
+      storeArrivalTime: firstPickup?.arrivalTime || null,
+      storeDepartTime: firstPickup?.departTime || null,
+      storeLat: firstPickup?.lat || base.storeLat || null,
+      storeLng: firstPickup?.lng || base.storeLng || null,
+      storeWeather: firstPickup?.weather || base.storeWeather || null,
+      completeTime: lastDropoff?.completeTime || base.completeTime || null,
+      endLat: lastDropoff?.lat || base.endLat || null,
+      endLng: lastDropoff?.lng || base.endLng || null,
+    };
+  };
+  const openEdit = (i) => { setEditIdx(i); setEditData(normalizeDeliverySteps(data.deliveries[i])); setEditField(null); setScreen("edit"); };
+  const svEdit = () => { if (editIdx === null) return; const nextEdit = normalizeDeliverySteps(editData); update(d => { d.deliveries[editIdx] = nextEdit; }); setScreen("main"); };
   const delEdit = () => { setPopup({ msg: "この記録を削除？", onConfirm: () => { update(d => { d.deliveries.splice(editIdx, 1); }); setPopup(null); setScreen("main"); } }); };
   const doGoalSave = () => { const a = parseInt(goalInput, 10) || 0; setGoal(a); sg({ amount: a, month: ms() }); setGoalModal(false); };
 
@@ -1919,10 +2180,11 @@ export default function App() {
   if (screen === "reward") {
     const av = rwField === "reward" ? rwAmt : rwInc;
     const st = rwField === "reward" ? setRwAmt : setRwInc;
+    const rewardTypeLocked = hasOrd && !!data.currentOrderType;
     return (<div style={ov}>{PopupEl}
       <div style={{ fontSize: sz(14), color: T.textMuted, marginBottom: 8, letterSpacing: 2, fontWeight: 600 }}>報酬入力</div>
       <div style={{ display: "flex", gap: 6, marginBottom: 10, maxWidth: 320, width: "100%", padding: "0 10px" }}>
-        {OT.map(t => (<button key={t.id} onClick={() => setRwType(t.id)} style={{ flex: 1, height: 40, borderRadius: 9, border: rwType === t.id ? `2px solid ${T.accent}` : `1.5px solid ${T.borderLight}`, background: rwType === t.id ? `${T.accent}20` : T.card, color: rwType === t.id ? T.accent : T.textMuted, fontSize: sz(13), fontWeight: 600, cursor: "pointer", fontFamily: FN }}>{t.label}</button>))}
+        {OT.map(t => (<button key={t.id} disabled={rewardTypeLocked} onClick={() => setRwType(t.id)} style={{ flex: 1, height: 40, borderRadius: 9, border: rwType === t.id ? `2px solid ${T.accent}` : `1.5px solid ${T.borderLight}`, background: rwType === t.id ? `${T.accent}20` : T.card, color: rwType === t.id ? T.accent : T.textMuted, fontSize: sz(13), fontWeight: 600, cursor: rewardTypeLocked ? "default" : "pointer", fontFamily: FN, opacity: rewardTypeLocked && rwType !== t.id ? 0.5 : 1 }}>{t.label}</button>))}
       </div>
       <div style={{ display: "flex", gap: 10, marginBottom: 6 }}>{COS.map(c => <button key={c.id} style={cB(c.bg, rwCo === c.id)} onClick={() => setRwCo(c.id)}>{c.letter}</button>)}</div>
       <div style={{ fontSize: sz(11), color: T.textMuted, marginBottom: 10, height: 14 }}>{rwCo ? COS.find(c => c.id === rwCo)?.name : "会社を選択"}</div>
@@ -2026,6 +2288,126 @@ export default function App() {
   // ═══ EDIT ═══
   if (screen === "edit" && editData) {
     const c = COS.find(cc => cc.id === editData.company);
+    const setEditTime = (field, value, fallbackTs) => {
+      const withSyncedFirstStop = (next) => {
+        if (!Array.isArray(next.stops) || !["storeArrivalTime", "storeDepartTime"].includes(field)) return next;
+        let synced = false;
+        return {
+          ...next,
+          stops: next.stops.map(s => {
+            if (synced || s.kind !== "pickup") return s;
+            synced = true;
+            return { ...s, arrivalTime: next.storeArrivalTime || null, departTime: next.storeDepartTime || null };
+          }),
+        };
+      };
+      if (!value) {
+        setEditData(withSyncedFirstStop({ ...editData, [field]: null }));
+        return;
+      }
+      const [h, m] = value.split(":").map(Number);
+      const base = new Date(editData[field] || fallbackTs || editData.orderTime || editData.completeTime || Date.now());
+      base.setHours(h, m, 0, 0);
+      setEditData(withSyncedFirstStop({ ...editData, [field]: base.getTime() }));
+    };
+    const storeWaitMsForEdit = () => editData.storeArrivalTime ? Math.max(0, (editData.storeDepartTime || editData.completeTime || Date.now()) - editData.storeArrivalTime) : 0;
+    const applyStoreWaitMinutes = (mins) => {
+      const safeMin = Math.max(0, Math.min(999, parseInt(mins, 10) || 0));
+      if (safeMin === 0) {
+        let synced = false;
+        const stops = Array.isArray(editData.stops) ? editData.stops.map(s => {
+          if (synced || s.kind !== "pickup") return s;
+          synced = true;
+          return { ...s, arrivalTime: null, departTime: null };
+        }) : editData.stops;
+        setEditData({ ...editData, storeArrivalTime: null, storeDepartTime: null, stops });
+        return;
+      }
+      const waitMs = safeMin * 60000;
+      let arrival = editData.storeArrivalTime || null;
+      let depart = editData.storeDepartTime || null;
+      if (arrival && !depart) depart = arrival + waitMs;
+      else if (!arrival && depart) arrival = depart - waitMs;
+      else if (arrival && depart) depart = arrival + waitMs;
+      else {
+        arrival = editData.orderTime || Date.now();
+        depart = arrival + waitMs;
+      }
+      if (editData.completeTime && depart > editData.completeTime) {
+        depart = editData.completeTime;
+        arrival = depart - waitMs;
+      }
+      if (editData.orderTime && arrival < editData.orderTime) {
+        arrival = editData.orderTime;
+        depart = arrival + waitMs;
+      }
+      let synced = false;
+      const stops = Array.isArray(editData.stops) ? editData.stops.map(s => {
+        if (synced || s.kind !== "pickup") return s;
+        synced = true;
+        return { ...s, arrivalTime: arrival, departTime: depart };
+      }) : editData.stops;
+      setEditData({ ...editData, storeArrivalTime: arrival, storeDepartTime: depart, stops });
+    };
+    const setEditStopTime = (stopId, field, value) => {
+      const stops = sanitizeStops(editData.stops);
+      const current = stops.find(s => s.id === stopId);
+      let ts = null;
+      if (value) {
+        const [h, m] = value.split(":").map(Number);
+        const base = new Date(current?.[field] || editData.orderTime || editData.completeTime || Date.now());
+        base.setHours(h, m, 0, 0);
+        ts = base.getTime();
+      }
+      const nextStops = stops.map(s => s.id === stopId ? { ...s, [field]: ts } : s);
+      setEditData(normalizeDeliverySteps({ ...editData, stops: nextStops }));
+    };
+    const setEditOrderType = (type) => {
+      const count = orderTypeCount(type);
+      let stops = sanitizeStops(editData.stops);
+      if (stops.length === 0) stops = normalizeDeliverySteps(editData).stops;
+      let pickups = stops.filter(s => s.kind === "pickup").slice(0, count);
+      let dropoffs = stops.filter(s => s.kind === "dropoff").slice(0, count);
+      while (pickups.length < count) {
+        const i = pickups.length;
+        pickups.push({ id: `pickup-${i + 1}`, kind: "pickup", index: i + 1, label: count === 1 ? "店舗" : `店舗${i + 1}`, arrivalTime: null, departTime: null, lat: null, lng: null, weather: null });
+      }
+      while (dropoffs.length < count) {
+        const i = dropoffs.length;
+        dropoffs.push({ id: `dropoff-${i + 1}`, kind: "dropoff", index: i + 1, label: count === 1 ? "配達" : `配達${i + 1}`, completeTime: null, lat: null, lng: null });
+      }
+      setEditData(normalizeDeliverySteps({ ...editData, orderType: type, stops: [...pickups, ...dropoffs] }));
+    };
+    const addEditPickup = () => {
+      const normalized = normalizeDeliverySteps(editData);
+      const stops = sanitizeStops(normalized.stops);
+      const pickups = stops.filter(s => s.kind === "pickup");
+      if (pickups.length >= 3) return;
+      const nextCount = pickups.length + 1;
+      const dropoffs = stops.filter(s => s.kind === "dropoff");
+      const nextStops = [
+        ...pickups,
+        { id: `pickup-${nextCount}`, kind: "pickup", index: nextCount, label: `店舗${nextCount}`, arrivalTime: null, departTime: null, lat: null, lng: null, weather: null },
+        ...dropoffs,
+      ];
+      setEditData(normalizeDeliverySteps({ ...normalized, stops: nextStops }));
+    };
+    const addEditDropoff = () => {
+      const normalized = normalizeDeliverySteps(editData);
+      const stops = sanitizeStops(normalized.stops);
+      const dropoffs = stops.filter(s => s.kind === "dropoff");
+      if (dropoffs.length >= 3) return;
+      const nextCount = dropoffs.length + 1;
+      setEditData(normalizeDeliverySteps({
+        ...normalized,
+        stops: [...stops, { id: `dropoff-${nextCount}`, kind: "dropoff", index: nextCount, label: `配達${nextCount}`, completeTime: null, lat: null, lng: null }],
+      }));
+    };
+    const deleteEditStop = (stopId) => {
+      const stops = sanitizeStops(editData.stops);
+      if (stops.length <= 2) return;
+      setEditData(normalizeDeliverySteps({ ...editData, stops: stops.filter(s => s.id !== stopId) }));
+    };
     if (editField === "reward" || editField === "incentive") {
       const ev = editField === "reward" ? String(editData.reward || "") : String(editData.incentive || "");
       const enp = (k) => { const cur = ev; if (k === "⌫") { const nv = cur.slice(0, -1); editField === "reward" ? setEditData({ ...editData, reward: parseInt(nv, 10) || 0 }) : setEditData({ ...editData, incentive: parseInt(nv, 10) || 0 }); } else { const nv = cur === "0" ? k : cur + k; if (nv.length <= 7) editField === "reward" ? setEditData({ ...editData, reward: parseInt(nv, 10) || 0 }) : setEditData({ ...editData, incentive: parseInt(nv, 10) || 0 }); } };
@@ -2033,6 +2415,25 @@ export default function App() {
         <div style={{ fontSize: sz(38), fontWeight: 800, color: editField === "incentive" ? T.purple : T.accent, textAlign: "center", marginBottom: 14 }}>¥{(editField === "reward" ? editData.reward : editData.incentive || 0).toLocaleString()}</div>
         <div style={npG}>{NP.map(k => <button key={k} style={npK} onClick={() => enp(k)}>{k}</button>)}</div>
         <button style={okBt(false)} onClick={() => setEditField(null)}>決定</button></div>);
+    }
+    if (editField === "storeWait") {
+      const currentMin = Math.round(storeWaitMsForEdit() / 60000);
+      const enp = (k) => {
+        const cur = String(currentMin || "");
+        if (k === "⌫") applyStoreWaitMinutes(cur.slice(0, -1));
+        else {
+          const nv = cur === "0" ? k : cur + k;
+          if (nv.length <= 3) applyStoreWaitMinutes(nv);
+        }
+      };
+      return (<div style={ov}>
+        <div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 8 }}>店舗待機時間を編集</div>
+        <div style={{ fontSize: sz(11), color: T.textDim, lineHeight: 1.6, textAlign: "center", marginBottom: 10 }}>ボタンを押し忘れた場合は、待った分数だけ入力してください。</div>
+        <div style={{ fontSize: sz(38), fontWeight: 800, color: "#F59E0B", textAlign: "center", marginBottom: 14 }}>{currentMin ? `${currentMin}分` : <span style={{ color: T.textFaint }}>0分</span>}</div>
+        <div style={npG}>{NP.map(k => <button key={k} style={npK} onClick={() => enp(k)}>{k}</button>)}</div>
+        <button style={okBt(false)} onClick={() => setEditField(null)}>決定</button>
+        <button style={canB} onClick={() => { applyStoreWaitMinutes(0); setEditField(null); }}>待機なしに戻す</button>
+      </div>);
     }
     return (<div style={ov}>{PopupEl}
       <div style={{ fontSize: sz(14), color: T.textMuted, marginBottom: 8, letterSpacing: 2, fontWeight: 600 }}>配達詳細・編集</div>
@@ -2046,26 +2447,85 @@ export default function App() {
             <span style={{ fontSize: sz(12), color: T.textMuted }}>時間</span>
             {editField === "orderTime" || editField === "completeTime" ? (
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                <input type="time" value={editData.orderTime ? (() => { const d = new Date(editData.orderTime); return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; })() : ""} onChange={(e) => { if (!e.target.value) return; const [h, m] = e.target.value.split(":").map(Number); const d = new Date(editData.orderTime || Date.now()); d.setHours(h, m, 0, 0); setEditData({ ...editData, orderTime: d.getTime() }); }} style={{ background: T.inputBg, border: `1px solid ${T.accent}`, borderRadius: 6, color: T.text, fontSize: sz(13), padding: "4px 6px", fontFamily: FN, width: 80 }} />
+                <input type="time" value={timeInputValue(editData.orderTime)} onChange={(e) => setEditTime("orderTime", e.target.value, editData.completeTime)} style={{ background: T.inputBg, border: `1px solid ${T.accent}`, borderRadius: 6, color: T.text, fontSize: sz(13), padding: "4px 6px", fontFamily: FN, width: 80 }} />
                 <span style={{ color: T.textMuted }}>〜</span>
-                <input type="time" value={editData.completeTime ? (() => { const d = new Date(editData.completeTime); return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; })() : ""} onChange={(e) => { if (!e.target.value) return; const [h, m] = e.target.value.split(":").map(Number); const d = new Date(editData.completeTime || Date.now()); d.setHours(h, m, 0, 0); setEditData({ ...editData, completeTime: d.getTime() }); }} style={{ background: T.inputBg, border: `1px solid ${T.accent}`, borderRadius: 6, color: T.text, fontSize: sz(13), padding: "4px 6px", fontFamily: FN, width: 80 }} />
+                <input type="time" value={timeInputValue(editData.completeTime)} onChange={(e) => setEditTime("completeTime", e.target.value, editData.orderTime)} style={{ background: T.inputBg, border: `1px solid ${T.accent}`, borderRadius: 6, color: T.text, fontSize: sz(13), padding: "4px 6px", fontFamily: FN, width: 80 }} />
                 <button onClick={() => setEditField(null)} style={{ background: T.accent, color: "#000", border: "none", borderRadius: 6, fontSize: sz(11), fontWeight: 700, padding: "4px 8px", cursor: "pointer", fontFamily: FN }}>OK</button>
               </div>
             ) : (
               <span onClick={() => setEditField("orderTime")} style={{ fontSize: sz(14), fontWeight: 600, color: T.text, cursor: "pointer" }}>{ft(editData.orderTime)}〜{ft(editData.completeTime)} ✎</span>
             )}
           </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+            <span style={{ fontSize: sz(12), color: T.textMuted }}>店舗到着/出発</span>
+            {editField === "storeTime" ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <input type="time" value={timeInputValue(editData.storeArrivalTime)} onChange={(e) => setEditTime("storeArrivalTime", e.target.value, editData.orderTime)} style={{ background: T.inputBg, border: `1px solid ${T.accent}`, borderRadius: 6, color: T.text, fontSize: sz(13), padding: "4px 6px", fontFamily: FN, width: 80 }} />
+                <span style={{ color: T.textMuted }}>〜</span>
+                <input type="time" value={timeInputValue(editData.storeDepartTime)} onChange={(e) => setEditTime("storeDepartTime", e.target.value, editData.storeArrivalTime || editData.completeTime)} style={{ background: T.inputBg, border: `1px solid ${T.accent}`, borderRadius: 6, color: T.text, fontSize: sz(13), padding: "4px 6px", fontFamily: FN, width: 80 }} />
+                <button onClick={() => setEditField(null)} style={{ background: T.accent, color: "#000", border: "none", borderRadius: 6, fontSize: sz(11), fontWeight: 700, padding: "4px 8px", cursor: "pointer", fontFamily: FN }}>OK</button>
+              </div>
+            ) : (
+              <span onClick={() => setEditField("storeTime")} style={{ fontSize: sz(14), fontWeight: 600, color: T.text, cursor: "pointer" }}>{editData.storeArrivalTime || editData.storeDepartTime ? `${ft(editData.storeArrivalTime)}〜${ft(editData.storeDepartTime)}` : "未記録"} ✎</span>
+            )}
+          </div>
           {(() => { const dur = editData.completeTime && editData.orderTime ? editData.completeTime - editData.orderTime : 0; const wait = editData.storeArrivalTime ? (editData.storeDepartTime || editData.completeTime || Date.now()) - editData.storeArrivalTime : 0; const durMin = dur > 0 ? dur / 60000 : 0; const perMin = durMin > 0 ? Math.round((editData.reward || 0) / durMin) : 0; return (<>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>所要時間</span><span style={{ fontSize: sz(14), fontWeight: 600, color: T.text }}>{fm(dur)}</span></div>
-            {wait > 0 && <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>店舗待機</span><span style={{ fontSize: sz(14), fontWeight: 600, color: wait >= 300000 || editData.cancelType === "store_wait" ? "#EF4444" : T.text }}>{fm(wait)}</span></div>}
+            <div onClick={() => setEditField("storeWait")} style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, cursor: "pointer" }}><span style={{ fontSize: sz(12), color: T.textMuted }}>店舗待機</span><span style={{ fontSize: sz(14), fontWeight: 600, color: wait >= 300000 || editData.cancelType === "store_wait" ? "#EF4444" : T.text }}>{fm(wait)} ✎</span></div>
             {perMin > 0 && !editData.cancelled && <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>分給</span><span style={{ fontSize: sz(15), fontWeight: 700, color: "#0EA5E9" }}>¥{perMin.toLocaleString()}/分</span></div>}
           </>); })()}
+          {Array.isArray(editData.stops) && editData.stops.length > 0 && (() => {
+            const stops = sanitizeStops(editData.stops);
+            const pickupCount = stops.filter(s => s.kind === "pickup").length;
+            const dropoffCount = stops.filter(s => s.kind === "dropoff").length;
+            return (
+              <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginTop: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <div style={{ fontSize: sz(12), color: T.textMuted }}>詳細ステップ</div>
+                  <div style={{ fontSize: sz(10), color: T.textDim }}>押し忘れ補正</div>
+                </div>
+                <div style={{ display: "grid", gap: 6 }}>
+                  {stops.map((s) => (
+                    <div key={s.id} style={{ background: T.barBg, borderRadius: 8, padding: "7px 8px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+                        <span style={{ fontSize: sz(11), color: T.textSub, fontWeight: 800 }}>{s.label || (s.kind === "pickup" ? "店舗" : "配達")}</span>
+                        {((s.kind === "pickup" && pickupCount > 1) || (s.kind === "dropoff" && dropoffCount > 1)) && (
+                          <button onClick={() => deleteEditStop(s.id)} style={{ background: "none", border: `1px solid #EF444466`, borderRadius: 6, color: "#EF4444", padding: "2px 6px", fontSize: sz(10), cursor: "pointer", fontFamily: FN }}>削除</button>
+                        )}
+                      </div>
+                      {s.kind === "pickup" ? (
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                          <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                            <span style={{ fontSize: sz(9), color: T.textDim }}>到着</span>
+                            <input type="time" value={timeInputValue(s.arrivalTime)} onChange={(e) => setEditStopTime(s.id, "arrivalTime", e.target.value)} style={{ background: T.inputBg, border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.text, fontSize: sz(12), padding: "5px 6px", fontFamily: FN }} />
+                          </label>
+                          <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                            <span style={{ fontSize: sz(9), color: T.textDim }}>出発</span>
+                            <input type="time" value={timeInputValue(s.departTime)} onChange={(e) => setEditStopTime(s.id, "departTime", e.target.value)} style={{ background: T.inputBg, border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.text, fontSize: sz(12), padding: "5px 6px", fontFamily: FN }} />
+                          </label>
+                        </div>
+                      ) : (
+                        <label style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                          <span style={{ fontSize: sz(9), color: T.textDim }}>完了</span>
+                          <input type="time" value={timeInputValue(s.completeTime)} onChange={(e) => setEditStopTime(s.id, "completeTime", e.target.value)} style={{ background: T.inputBg, border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.text, fontSize: sz(12), padding: "5px 6px", fontFamily: FN }} />
+                        </label>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 8 }}>
+                  <button disabled={pickupCount >= 3} onClick={addEditPickup} style={{ height: 34, borderRadius: 8, border: `1px solid ${T.borderLight}`, background: pickupCount >= 3 ? T.barBg : T.inputBg, color: pickupCount >= 3 ? T.textFaint : T.text, fontSize: sz(11), fontWeight: 700, cursor: pickupCount >= 3 ? "default" : "pointer", fontFamily: FN }}>店舗を追加</button>
+                  <button disabled={dropoffCount >= 3} onClick={addEditDropoff} style={{ height: 34, borderRadius: 8, border: `1px solid ${T.borderLight}`, background: dropoffCount >= 3 ? T.barBg : T.inputBg, color: dropoffCount >= 3 ? T.textFaint : T.text, fontSize: sz(11), fontWeight: 700, cursor: dropoffCount >= 3 ? "default" : "pointer", fontFamily: FN }}>配達先を追加</button>
+                </div>
+              </div>
+            );
+          })()}
           <div onClick={() => setEditField("reward")} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}`, cursor: "pointer" }}><span style={{ fontSize: sz(13), color: T.textMuted }}>配達報酬</span><span style={{ fontSize: sz(17), fontWeight: 700, color: T.accent }}>¥{(editData.reward || 0).toLocaleString()} ✎</span></div>
           {editData.rawReward && editData.company === "pickgo" && <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0 7px" }}><span style={{ fontSize: sz(11), color: T.textDim }}>PickGo 入力金額</span><span style={{ fontSize: sz(13), color: T.textMuted }}>¥{editData.rawReward.toLocaleString()}（手数料{Math.round((1 - editData.reward / editData.rawReward) * 100)}%引き）</span></div>}
           {editData.rawReward && editData.company === "rocket" && editData.rocketBonusRate > 0 && <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0 7px" }}><span style={{ fontSize: sz(11), color: T.textDim }}>Rocket Now 基本金額</span><span style={{ fontSize: sz(13), color: T.textMuted }}>¥{editData.rawReward.toLocaleString()}（+{editData.rocketBonusRate}%反映）</span></div>}
           <div onClick={() => setEditField("incentive")} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}`, cursor: "pointer" }}><span style={{ fontSize: sz(13), color: T.textMuted }}>インセンティブ</span><span style={{ fontSize: sz(17), fontWeight: 700, color: T.purple }}>¥{(editData.incentive || 0).toLocaleString()} ✎</span></div>
           <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8 }}><div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 5 }}>会社</div><div style={{ display: "flex", gap: 7 }}>{COS.map(cc => (<button key={cc.id} onClick={() => setEditData({ ...editData, company: cc.id })} style={{ width: 40, height: 40, borderRadius: 10, border: editData.company === cc.id ? `2px solid ${T.text}` : `1.5px solid ${T.borderLight}`, background: editData.company === cc.id ? T.inputBg : cc.bg, color: "#FFF", fontSize: sz(16), fontWeight: 800, cursor: "pointer", fontFamily: FN }}>{cc.letter}</button>))}</div></div>
-          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginTop: 8 }}><div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 5 }}>タイプ</div><div style={{ display: "flex", gap: 6 }}>{OT.map(ot => (<button key={ot.id} onClick={() => setEditData({ ...editData, orderType: ot.id })} style={{ flex: 1, padding: "6px 0", borderRadius: 7, border: editData.orderType === ot.id ? `2px solid ${T.accent}` : `1.5px solid ${T.borderLight}`, background: editData.orderType === ot.id ? `${T.accent}20` : T.card, color: editData.orderType === ot.id ? T.accent : T.textMuted, fontSize: sz(12), fontWeight: 600, cursor: "pointer", fontFamily: FN }}>{ot.label}</button>))}</div></div>
+          <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginTop: 8 }}><div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 5 }}>タイプ</div><div style={{ display: "flex", gap: 6 }}>{OT.map(ot => (<button key={ot.id} onClick={() => setEditOrderType(ot.id)} style={{ flex: 1, padding: "6px 0", borderRadius: 7, border: editData.orderType === ot.id ? `2px solid ${T.accent}` : `1.5px solid ${T.borderLight}`, background: editData.orderType === ot.id ? `${T.accent}20` : T.card, color: editData.orderType === ot.id ? T.accent : T.textMuted, fontSize: sz(12), fontWeight: 600, cursor: "pointer", fontFamily: FN }}>{ot.label}</button>))}</div></div>
           {/* Rating */}
           <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginTop: 8 }}>
             <div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 5 }}>配達評価</div>
@@ -2143,6 +2603,37 @@ export default function App() {
           <div style={rowLast}>
             <div><div style={{ fontSize: sz(14), fontWeight: 600 }}>文字サイズ（大きめ）</div><div style={{ fontSize: sz(11), color: T.textDim }}>全体の文字を大きく表示</div></div>
             <Toggle on={settings.largeFont} onToggle={() => updateSettings({ largeFont: !settings.largeFont })} T={T} />
+          </div>
+        </div>
+        {/* Rocket Now追加報酬設定 */}
+        <div style={{ background: T.card, borderRadius: 14, padding: "4px 18px 14px", border: `1px solid ${T.border}`, marginBottom: 16 }}>
+          <div style={{ fontSize: sz(12), color: T.textDim, fontWeight: 600, padding: "12px 0 4px", letterSpacing: 1 }}>報酬補正</div>
+          <div style={{ fontSize: sz(14), fontWeight: 700, marginBottom: 4, color: T.text }}>Rocket Now 追加報酬</div>
+          <div style={{ fontSize: sz(11), color: T.textMuted, lineHeight: 1.6, marginBottom: 8 }}>配達完了時にRocket Nowを選択すると、入力金額に選択中の追加報酬率を上乗せして記録します。</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8 }}>
+            {[
+              { rate: 0, label: "追加報酬なし", sub: "0%" },
+              { rate: 10, label: "グリーン", sub: "10%" },
+              { rate: 15, label: "ブルー", sub: "15%" },
+              { rate: 20, label: "パープル", sub: "20%" },
+              { rate: 25, label: "ゴールド", sub: "25%" },
+              { rate: 30, label: "ゴールドプラス", sub: "30%" },
+            ].map(opt => {
+              const sel = (settings.rocketBonusRate || 0) === opt.rate;
+              return (
+                <button key={opt.rate} onClick={() => updateSettings({ rocketBonusRate: opt.rate })} style={{
+                  padding: "9px 6px", borderRadius: 10,
+                  border: sel ? `2px solid ${T.accent}` : `1px solid ${T.borderLight}`,
+                  background: sel ? `${T.accent}22` : T.inputBg,
+                  color: sel ? T.accent : T.textMuted,
+                  cursor: "pointer", fontFamily: FN,
+                  display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
+                }}>
+                  <span style={{ fontSize: sz(12), fontWeight: 800 }}>{opt.label}</span>
+                  <span style={{ fontSize: sz(11), fontWeight: 600, color: sel ? T.accent : T.textDim }}>{opt.sub}</span>
+                </button>
+              );
+            })}
           </div>
         </div>
         {/* 稼働曜日設定 */}
@@ -2235,42 +2726,41 @@ export default function App() {
             })}
           </div>
         </div>
-        {/* Rocket Now追加報酬設定 */}
-        <div style={{ background: T.card, borderRadius: 14, padding: "4px 18px 14px", border: `1px solid ${T.border}`, marginTop: 16 }}>
-          <div style={{ fontSize: sz(12), color: T.textDim, fontWeight: 600, padding: "12px 0 4px", letterSpacing: 1 }}>Rocket Now 追加報酬</div>
-          <div style={{ fontSize: sz(11), color: T.textMuted, lineHeight: 1.6, marginBottom: 8 }}>配達完了時にRocket Nowを選択すると、入力金額に選択中の追加報酬率を上乗せして記録します。</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8 }}>
-            {[
-              { rate: 0, label: "追加報酬なし", sub: "0%" },
-              { rate: 10, label: "グリーン", sub: "10%" },
-              { rate: 15, label: "ブルー", sub: "15%" },
-              { rate: 20, label: "パープル", sub: "20%" },
-              { rate: 25, label: "ゴールド", sub: "25%" },
-              { rate: 30, label: "ゴールドプラス", sub: "30%" },
-            ].map(opt => {
-              const sel = (settings.rocketBonusRate || 0) === opt.rate;
-              return (
-                <button key={opt.rate} onClick={() => updateSettings({ rocketBonusRate: opt.rate })} style={{
-                  padding: "9px 6px", borderRadius: 10,
-                  border: sel ? `2px solid ${T.accent}` : `1px solid ${T.borderLight}`,
-                  background: sel ? `${T.accent}22` : T.inputBg,
-                  color: sel ? T.accent : T.textMuted,
-                  cursor: "pointer", fontFamily: FN,
-                  display: "flex", flexDirection: "column", alignItems: "center", gap: 2,
-                }}>
-                  <span style={{ fontSize: sz(12), fontWeight: 800 }}>{opt.label}</span>
-                  <span style={{ fontSize: sz(11), fontWeight: 600, color: sel ? T.accent : T.textDim }}>{opt.sub}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
         {/* データ出力 */}
         <div style={{ background: T.card, borderRadius: 14, padding: "14px 18px", border: `1px solid ${T.border}`, marginTop: 16 }}>
           <div style={{ fontSize: sz(12), color: T.textDim, fontWeight: 600, marginBottom: 4, letterSpacing: 1 }}>データ出力</div>
           <div style={{ fontSize: sz(14), fontWeight: 600, color: T.text, marginBottom: 4 }}>CSVテキストを保存</div>
           <div style={{ fontSize: sz(11), color: T.textMuted, lineHeight: 1.6, marginBottom: 10 }}>配達・稼働・休憩・地蔵・インセンティブを1つのCSVにまとめます。GPS座標とメモも含まれます。</div>
-          <button onClick={downloadCsvText} style={{ width: "100%", height: 44, borderRadius: 10, border: "none", background: T.accent, color: "#000", fontSize: sz(14), fontWeight: 700, cursor: "pointer", fontFamily: FN }}>CSVをダウンロード</button>
+          <button onClick={downloadCsvText} style={{ width: "100%", height: 44, borderRadius: 10, border: "none", background: T.accent, color: "#000", fontSize: sz(14), fontWeight: 700, cursor: "pointer", fontFamily: FN }}>CSVを保存/共有</button>
+          {csvExport && (
+            <div style={{ marginTop: 12, borderTop: `1px solid ${T.border}`, paddingTop: 10 }}>
+              <div style={{ fontSize: sz(11), color: T.textMuted, lineHeight: 1.5, marginBottom: 8 }}>
+                保存できない場合は下のCSVテキストをコピーして渡してください。ファイル名: {csvExport.filename}
+              </div>
+              <textarea
+                readOnly
+                value={csvExport.csv}
+                style={{
+                  width: "100%", height: 120, borderRadius: 8,
+                  border: `1px solid ${T.borderLight}`, background: T.inputBg,
+                  color: T.text, fontSize: sz(10), padding: "8px",
+                  fontFamily: "monospace", boxSizing: "border-box",
+                }}
+              />
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                <button onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(csvExport.csv);
+                    setActionToast("✓ CSVをコピーしました");
+                    setTimeout(() => setActionToast(null), 1600);
+                  } catch {
+                    setPopup({ msg: "自動コピーに失敗しました。\nCSVテキスト欄を長押ししてコピーしてください。", onConfirm: () => setPopup(null) });
+                  }
+                }} style={{ flex: 1, height: 38, borderRadius: 9, border: "none", background: T.purple, color: "#FFF", fontSize: sz(12), fontWeight: 700, cursor: "pointer", fontFamily: FN }}>コピー</button>
+                <button onClick={() => setCsvExport(null)} style={{ width: 82, height: 38, borderRadius: 9, border: `1px solid ${T.borderLight}`, background: "none", color: T.textMuted, fontSize: sz(12), fontWeight: 700, cursor: "pointer", fontFamily: FN }}>閉じる</button>
+              </div>
+            </div>
+          )}
         </div>
         <div style={{ background: T.card, borderRadius: 14, padding: "12px 18px", border: `1px solid ${T.border}`, marginTop: 16 }}>
           <div style={{ fontSize: sz(12), color: "#EF4444", fontWeight: 600, marginBottom: 6 }}>データについて</div>
@@ -4521,6 +5011,19 @@ export default function App() {
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>所要時間</span><span style={{ fontSize: sz(14), fontWeight: 600, color: T.text }}>{fm(dur)}</span></div>
               {storeWait > 0 && <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>店舗待機</span><span style={{ fontSize: sz(14), fontWeight: 600, color: storeWait >= 300000 || d.cancelType === "store_wait" ? "#EF4444" : T.text }}>{fm(storeWait)}</span></div>}
               {perMin > 0 && !d.cancelled && <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>分給</span><span style={{ fontSize: sz(15), fontWeight: 700, color: "#0EA5E9" }}>¥{perMin.toLocaleString()}/分</span></div>}
+              {Array.isArray(d.stops) && d.stops.length > 0 && (
+                <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginTop: 8, marginBottom: 4 }}>
+                  <div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 6 }}>詳細ステップ</div>
+                  <div style={{ display: "grid", gap: 5 }}>
+                    {d.stops.map((s, i) => (
+                      <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: T.barBg, borderRadius: 7, padding: "6px 8px" }}>
+                        <span style={{ fontSize: sz(11), color: T.textSub, fontWeight: 700 }}>{s.label || (s.kind === "pickup" ? "店舗" : "配達")}</span>
+                        <span style={{ fontSize: sz(11), color: T.textMuted }}>{s.kind === "pickup" ? `${ft(s.arrivalTime)}〜${ft(s.departTime)}` : ft(s.completeTime)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}` }}><span style={{ fontSize: sz(13), color: T.textMuted }}>配達報酬</span><span style={{ fontSize: sz(17), fontWeight: 700, color: T.accent }}>¥{(d.reward || 0).toLocaleString()}</span></div>
               {d.rawReward && d.company === "pickgo" && <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0 7px" }}><span style={{ fontSize: sz(11), color: T.textDim }}>PickGo 入力金額</span><span style={{ fontSize: sz(13), color: T.textMuted }}>¥{d.rawReward.toLocaleString()}（手数料{Math.round((1 - d.reward / d.rawReward) * 100)}%引き）</span></div>}
               {d.rawReward && d.company === "rocket" && d.rocketBonusRate > 0 && <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0 7px" }}><span style={{ fontSize: sz(11), color: T.textDim }}>Rocket Now 基本金額</span><span style={{ fontSize: sz(13), color: T.textMuted }}>¥{d.rawReward.toLocaleString()}（+{d.rocketBonusRate}%反映）</span></div>}
@@ -4809,7 +5312,7 @@ export default function App() {
   }
 
   // ═══ MAIN ═══
-  const orderStatus = hasOrd ? (!hasStoreArrived ? "店舗へ移動中" : !hasStoreDeparted ? "店舗待機中" : "配達中") : null;
+  const orderStatus = hasOrd ? (currentOrderStep ? stepStatusLabel(currentOrderStep, currentOrderType) : (!hasStoreArrived ? "店舗へ移動中" : !hasStoreDeparted ? "店舗待機中" : "配達中")) : null;
   const stTx = isOn ? (isBrk ? "休憩中" : isJz ? "地蔵中" : orderStatus || "待機中") : hasWrk ? "オフライン" : "未開始";
   const stCo = isOn ? (isJz ? "#F59E0B" : "#22C55E") : hasWrk ? "#F59E0B" : T.textDim;
 
@@ -5274,7 +5777,29 @@ export default function App() {
       <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, maxWidth: 430, margin: "0 auto", padding: "10px 16px 18px", background: `linear-gradient(transparent, ${T.bg} 30%)`, display: "flex", gap: 8, zIndex: 50 }}>
         {!hasOrd ? (
           <button style={flashBtn("#0EA5E9", !isOn || isBrk, BBH, "order")} onClick={doOrd} disabled={!isOn || isBrk}>受注</button>
-        ) : !hasStoreArrived ? (<>
+        ) : currentOrderStep ? (() => {
+          const label = stepButtonLabel(currentOrderStep, currentOrderType);
+          if (currentOrderStep.action === "pickup_arrive") return (<>
+            <button style={flashBtn("#0EA5E9", false, BBH, "storeArrive")} onClick={doStoreArrive}>{label}</button>
+            <button style={btn("#EF4444", false, BBH)} onClick={() => openCancel("before_store")}>未到着キャンセル</button>
+          </>);
+          if (currentOrderStep.action === "pickup_depart") return (<>
+            <button style={flashBtn("#F59E0B", false, BBH, "storeDepart")} onClick={doStoreDepart}>{label}</button>
+            <button style={btn("#EF4444", false, BBH)} onClick={() => openCancel("store_wait")}>調理待ちキャンセル</button>
+          </>);
+          if (currentOrderStep.action === "dropoff_complete") return (
+            <button style={flashBtn("#F59E0B", false, BBH, "complete")} onClick={doDropoffComplete}>{label}</button>
+          );
+          if (currentOrderStep.action === "choose_route") return (<>
+            {(data.currentStops || []).filter(s => s.kind === "pickup").length < 3 && (
+              <button style={flashBtn("#0EA5E9", false, BBH, "order")} onClick={doNextStore}>次の店舗へ</button>
+            )}
+            <button style={flashBtn("#F59E0B", false, BBH, "complete")} onClick={doStartDeliveryRoute}>配達へ</button>
+          </>);
+          return (
+            <button style={flashBtn("#F59E0B", false, BBH, "complete")} onClick={openRewardInput}>{label}</button>
+          );
+        })() : !hasStoreArrived ? (<>
           <button style={flashBtn("#0EA5E9", false, BBH, "storeArrive")} onClick={doStoreArrive}>店舗到着</button>
           <button style={btn("#EF4444", false, BBH)} onClick={() => openCancel("before_store")}>未到着キャンセル</button>
         </>) : !hasStoreDeparted ? (<>
