@@ -253,6 +253,7 @@ export default function App() {
           newDayData.currentStoreWeather = prev.currentStoreWeather || null;
           newDayData.currentOrderType = prev.currentOrderType || null;
           newDayData.currentStops = (prev.currentStops || []).map(s => ({ ...s }));
+          newDayData.currentAddedOrderCount = prev.currentAddedOrderCount || 0;
           return newDayData;
         });
       }
@@ -309,6 +310,7 @@ export default function App() {
           todaySaved.currentStoreWeather = activeLog.currentStoreWeather || null;
           todaySaved.currentOrderType = activeLog.currentOrderType || null;
           todaySaved.currentStops = (activeLog.currentStops || []).map(s => ({ ...s }));
+          todaySaved.currentAddedOrderCount = activeLog.currentAddedOrderCount || 0;
         }
         if (cutoff && Date.now() >= cutoff && !todaySaved.currentOrderTime) setData(migrate(closeActiveLogAt(todaySaved, cutoff)));
         else setData(migrate(todaySaved));
@@ -842,20 +844,22 @@ export default function App() {
 
   const orderTypeCount = (type) => type === "triple" ? 3 : type === "double" ? 2 : 1;
   const orderTypeFromCount = (count) => count >= 3 ? "triple" : count >= 2 ? "double" : "single";
+  const pickupLabel = (count, index) => count === 1 ? "店舗" : `受取${index}`;
+  const dropoffLabel = (count, index) => count === 1 ? "配達" : `お届け${index}`;
   const buildPickupStops = (count = 1) => {
     return [
       ...Array.from({ length: count }, (_, i) => ({
         id: `pickup-${i + 1}`, kind: "pickup", index: i + 1,
-        label: count === 1 ? "店舗" : `店舗${i + 1}`,
-        arrivalTime: null, departTime: null, lat: null, lng: null, weather: null,
+        label: pickupLabel(count, i + 1),
+        arrivalTime: null, departTime: null, lat: null, lng: null, weather: null, source: i === 0 ? "initial" : "before_delivery",
       })),
     ];
   };
   const buildDropoffStops = (count = 1) => (
     Array.from({ length: count }, (_, i) => ({
         id: `dropoff-${i + 1}`, kind: "dropoff", index: i + 1,
-        label: count === 1 ? "配達" : `配達${i + 1}`,
-        completeTime: null, lat: null, lng: null,
+        label: dropoffLabel(count, i + 1),
+        completeTime: null, lat: null, lng: null, source: "planned",
       }))
   );
   const getNextOrderStep = (stops) => {
@@ -875,20 +879,20 @@ export default function App() {
   const stepButtonLabel = (step, type) => {
     if (!step) return "";
     const multi = orderTypeCount(type) > 1;
-    const idx = step.stop?.index || 1;
-    if (step.action === "pickup_arrive") return multi ? `店舗${idx}到着` : "店舗到着";
-    if (step.action === "pickup_depart") return multi ? `店舗${idx}出発` : "店舗出発";
-    if (step.action === "dropoff_complete") return multi ? `${idx}件目配達完了` : "配達完了";
+    const label = step.stop?.label || "";
+    if (step.action === "pickup_arrive") return multi ? `${label}到着` : "店舗到着";
+    if (step.action === "pickup_depart") return multi ? `${label}出発` : "店舗出発";
+    if (step.action === "dropoff_complete") return multi ? `${label}完了` : "配達完了";
     if (step.action === "choose_route") return "次の行き先を選択";
     return "報酬入力へ";
   };
   const stepStatusLabel = (step, type) => {
     if (!step) return "配達中";
     const multi = orderTypeCount(type) > 1;
-    const idx = step.stop?.index || 1;
-    if (step.action === "pickup_arrive") return multi ? `店舗${idx}へ移動中` : "店舗へ移動中";
-    if (step.action === "pickup_depart") return multi ? `店舗${idx}待機中` : "店舗待機中";
-    if (step.action === "dropoff_complete") return multi ? `${idx}件目へ配達中` : "配達中";
+    const label = step.stop?.label || "";
+    if (step.action === "pickup_arrive") return multi ? `${label}へ移動中` : "店舗へ移動中";
+    if (step.action === "pickup_depart") return multi ? `${label}待機中` : "店舗待機中";
+    if (step.action === "dropoff_complete") return multi ? `${label}へ配達中` : "配達中";
     if (step.action === "choose_route") return "次の行き先を選択";
     return "報酬入力待ち";
   };
@@ -1035,9 +1039,9 @@ export default function App() {
       return;
     }
     const columns = [
-      "record_type", "date", "index", "stop_index", "stop_type", "stop_label", "company", "company_name", "order_type", "cancelled", "cancel_type", "rating", "manual_weather",
+      "record_type", "date", "index", "stop_index", "stop_type", "stop_label", "stop_sequence_note", "company", "company_name", "order_type", "cancelled", "cancel_type", "rating", "manual_weather",
       "start_time", "end_time", "order_time", "store_arrival_time", "store_depart_time", "complete_time",
-      "duration_minutes", "online_minutes", "break_minutes", "jizo_minutes", "work_minutes", "delivery_count",
+      "duration_minutes", "online_minutes", "break_minutes", "jizo_minutes", "work_minutes", "delivery_count", "pickup_count", "dropoff_count", "pickup_wait_minutes_total", "pickup_wait_minutes_max", "added_order_count",
       "raw_reward", "reward", "incentive", "total_amount", "per_min", "rocket_bonus_rate",
       "start_lat", "start_lng", "store_lat", "store_lng", "end_lat", "end_lng",
       "weather_source", "api_weather_id", "temperature", "windspeed", "precipitation", "precipitation_avg", "precipitation_max", "precipitation_samples", "rain_level", "area_name", "memo"
@@ -1104,11 +1108,22 @@ export default function App() {
       deliveries.forEach((d, i) => {
         const duration = d.orderTime && d.completeTime ? d.completeTime - d.orderTime : 0;
         const durationMinutes = roundMin(duration);
+        const pickupStops = (d.stops || []).filter(stop => stop.kind === "pickup");
+        const dropoffStops = (d.stops || []).filter(stop => stop.kind === "dropoff");
+        const pickupWaits = pickupStops
+          .map(stop => stop.arrivalTime && stop.departTime ? Math.max(0, stop.departTime - stop.arrivalTime) : 0)
+          .filter(Boolean);
+        const pickupWaitTotal = pickupWaits.reduce((sum, value) => sum + value, 0);
+        const pickupWaitMax = pickupWaits.length ? Math.max(...pickupWaits) : 0;
         pushRow({
           record_type: "delivery", date: log.date, index: i + 1, company: d.company, company_name: companyName(d.company),
           order_type: d.orderType || "single", cancelled: d.cancelled ? 1 : 0, cancel_type: d.cancelType || "", rating: d.rating || "", manual_weather: log.weather,
           order_time: fmtDateTime(d.orderTime), store_arrival_time: fmtDateTime(d.storeArrivalTime), store_depart_time: fmtDateTime(d.storeDepartTime), complete_time: fmtDateTime(d.completeTime),
           duration_minutes: durationMinutes, delivery_count: dc(d),
+          pickup_count: pickupStops.length || "", dropoff_count: dropoffStops.length || "",
+          pickup_wait_minutes_total: pickupWaitTotal ? roundMin(pickupWaitTotal) : "",
+          pickup_wait_minutes_max: pickupWaitMax ? roundMin(pickupWaitMax) : "",
+          added_order_count: d.addedOrderCount || "",
           raw_reward: d.rawReward || "", reward: d.reward || 0, incentive: d.incentive || 0, total_amount: (d.reward || 0) + (d.incentive || 0),
           rocket_bonus_rate: d.rocketBonusRate || "",
           per_min: durationMinutes > 0 && !d.cancelled ? Math.round(((d.reward || 0) / durationMinutes) * 10) / 10 : "",
@@ -1122,6 +1137,7 @@ export default function App() {
           pushRow({
             record_type: "delivery_stop", date: log.date, index: i + 1, stop_index: stopIdx + 1,
             stop_type: stop.kind || "", stop_label: stop.label || "",
+            stop_sequence_note: "番号は順番のみ_受取とお届けの対応ではない",
             company: d.company, company_name: companyName(d.company), order_type: d.orderType || "single",
             start_time: fmtDateTime(stopStart), end_time: fmtDateTime(stopEnd),
             duration_minutes: stop.kind === "pickup" && stopStart && stopEnd ? roundMin(stopEnd - stopStart) : "",
@@ -1649,7 +1665,7 @@ export default function App() {
   const clearCurrentOrder = (d) => {
     d.currentOrderTime = null; d.currentOrderPos = null; d.currentOrderWeather = null;
     d.currentStoreArrivalTime = null; d.currentStoreDepartTime = null; d.currentStorePos = null; d.currentStoreWeather = null;
-    d.currentOrderType = null; d.currentStops = [];
+    d.currentOrderType = null; d.currentStops = []; d.currentAddedOrderCount = 0;
   };
   const openRewardInput = () => {
     setRwCo(null); setRwAmt(""); setRwInc(""); setRwField("reward"); setRwType(data.currentOrderType || "single"); setRwRating(null); setScreen("reward"); pulse("complete");
@@ -1663,6 +1679,7 @@ export default function App() {
       d.currentStoreArrivalTime = null; d.currentStoreDepartTime = null; d.currentStorePos = null; d.currentStoreWeather = null;
       d.currentOrderType = "single";
       d.currentStops = buildPickupStops(1);
+      d.currentAddedOrderCount = 0;
     });
     getPos().then(p => { if (p) { update(d => { d.currentOrderPos = p; }); fetchWeather(p.lat, p.lng).then(w => { if (w) update(d => { d.currentOrderWeather = w; d.weatherSamples.push(makeWeatherSample("order", p, w)); }); }); } });
     pulse("order");
@@ -1719,13 +1736,42 @@ export default function App() {
       const relabeled = (d.currentStops || []).filter(s => s.kind === "pickup").map((s, i) => ({
         ...s,
         index: i + 1,
-        label: `店舗${i + 1}`,
+        label: pickupLabel(nextCount, i + 1),
       }));
-      relabeled.push({ id: `pickup-${nextCount}`, kind: "pickup", index: nextCount, label: `店舗${nextCount}`, arrivalTime: null, departTime: null, lat: null, lng: null, weather: null });
+      relabeled.push({ id: `pickup-${nextCount}`, kind: "pickup", index: nextCount, label: pickupLabel(nextCount, nextCount), arrivalTime: null, departTime: null, lat: null, lng: null, weather: null, source: "before_delivery" });
       d.currentStops = relabeled;
       d.currentOrderType = orderTypeFromCount(nextCount);
     });
-    setActionToast(`✓ 店舗${nextCount}へ`);
+    setActionToast(`✓ ${pickupLabel(nextCount, nextCount)}へ`);
+    setTimeout(() => setActionToast(null), 1200);
+  };
+  const doAddOrderDuringDelivery = () => {
+    const step = getNextOrderStep(data.currentStops || []);
+    if (!hasOrd || step?.action !== "dropoff_complete") return;
+    const stops = sanitizeStops(data.currentStops);
+    const pickups = stops.filter(s => s.kind === "pickup");
+    const dropoffs = stops.filter(s => s.kind === "dropoff");
+    const nextCount = Math.max(pickups.length, dropoffs.length) + 1;
+    if (nextCount > 3) return;
+    update(d => {
+      const current = sanitizeStops(d.currentStops);
+      const currentPickups = current.filter(s => s.kind === "pickup");
+      const currentDropoffs = current.filter(s => s.kind === "dropoff");
+      const relabeledPickups = currentPickups.map((s, i) => ({ ...s, index: i + 1, label: pickupLabel(nextCount, i + 1) }));
+      const relabeledDropoffs = currentDropoffs.map((s, i) => ({ ...s, index: i + 1, label: dropoffLabel(nextCount, i + 1) }));
+      const addedPickup = {
+        id: `pickup-${nextCount}`, kind: "pickup", index: nextCount, label: pickupLabel(nextCount, nextCount),
+        arrivalTime: null, departTime: null, lat: null, lng: null, weather: null, source: "added_during_delivery",
+      };
+      const addedDropoff = {
+        id: `dropoff-${nextCount}`, kind: "dropoff", index: nextCount, label: dropoffLabel(nextCount, nextCount),
+        completeTime: null, lat: null, lng: null, source: "added_during_delivery",
+      };
+      d.currentStops = [...relabeledPickups, addedPickup, ...relabeledDropoffs, addedDropoff];
+      d.currentOrderType = orderTypeFromCount(nextCount);
+      d.currentAddedOrderCount = (d.currentAddedOrderCount || 0) + 1;
+    });
+    setActionToast(`✓ ${pickupLabel(nextCount, nextCount)}を追加`);
     setTimeout(() => setActionToast(null), 1200);
   };
   const doStartDeliveryRoute = () => {
@@ -1737,7 +1783,7 @@ export default function App() {
       const relabeledPickups = (d.currentStops || []).filter(s => s.kind === "pickup").map((s, i) => ({
         ...s,
         index: i + 1,
-        label: count === 1 ? "店舗" : `店舗${i + 1}`,
+        label: pickupLabel(count, i + 1),
       }));
       d.currentStops = [...relabeledPickups, ...buildDropoffStops(count)];
       d.currentOrderType = orderTypeFromCount(count);
@@ -1806,6 +1852,7 @@ export default function App() {
         apiWeather: data.currentOrderWeather || null,
         storeWeather: data.currentStoreWeather || firstPickup?.weather || null,
         stops,
+        addedOrderCount: data.currentAddedOrderCount || 0,
         areaName: null, memo: "",
       };
       if (isCrossDay) {
@@ -1869,6 +1916,7 @@ export default function App() {
       apiWeather: data.currentOrderWeather || null,
       storeWeather: data.currentStoreWeather || firstPickup?.weather || null,
       stops,
+      addedOrderCount: data.currentAddedOrderCount || 0,
       areaName: null,
     };
     if (isCrossDay) {
@@ -1990,7 +2038,7 @@ export default function App() {
     if (stops.length === 0) {
       const count = Math.max(1, orderTypeCount(base.orderType));
       const pickup = {
-        id: "pickup-1", kind: "pickup", index: 1, label: count === 1 ? "店舗" : "店舗1",
+        id: "pickup-1", kind: "pickup", index: 1, label: pickupLabel(count, 1),
         arrivalTime: base.storeArrivalTime || null,
         departTime: base.storeDepartTime || null,
         lat: base.storeLat || null,
@@ -2008,11 +2056,11 @@ export default function App() {
     const pickups = stops.filter(s => s.kind === "pickup");
     const dropoffs = stops.filter(s => s.kind === "dropoff");
     const count = Math.max(1, Math.min(3, Math.max(pickups.length, dropoffs.length)));
-    const relabeledPickups = pickups.slice(0, 3).map((s, i) => ({ ...s, index: i + 1, label: count === 1 ? "店舗" : `店舗${i + 1}` }));
-    let relabeledDropoffs = dropoffs.slice(0, 3).map((s, i) => ({ ...s, index: i + 1, label: count === 1 ? "配達" : `配達${i + 1}` }));
+    const relabeledPickups = pickups.slice(0, 3).map((s, i) => ({ ...s, index: i + 1, label: pickupLabel(count, i + 1) }));
+    let relabeledDropoffs = dropoffs.slice(0, 3).map((s, i) => ({ ...s, index: i + 1, label: dropoffLabel(count, i + 1) }));
     while (relabeledDropoffs.length < count) {
       const i = relabeledDropoffs.length;
-      relabeledDropoffs.push({ id: `dropoff-${i + 1}`, kind: "dropoff", index: i + 1, label: count === 1 ? "配達" : `配達${i + 1}`, completeTime: null, lat: null, lng: null });
+      relabeledDropoffs.push({ id: `dropoff-${i + 1}`, kind: "dropoff", index: i + 1, label: dropoffLabel(count, i + 1), completeTime: null, lat: null, lng: null });
     }
     const nextStops = [...relabeledPickups, ...relabeledDropoffs];
     const firstPickup = relabeledPickups[0] || null;
@@ -2370,11 +2418,11 @@ export default function App() {
       let dropoffs = stops.filter(s => s.kind === "dropoff").slice(0, count);
       while (pickups.length < count) {
         const i = pickups.length;
-        pickups.push({ id: `pickup-${i + 1}`, kind: "pickup", index: i + 1, label: count === 1 ? "店舗" : `店舗${i + 1}`, arrivalTime: null, departTime: null, lat: null, lng: null, weather: null });
+        pickups.push({ id: `pickup-${i + 1}`, kind: "pickup", index: i + 1, label: pickupLabel(count, i + 1), arrivalTime: null, departTime: null, lat: null, lng: null, weather: null });
       }
       while (dropoffs.length < count) {
         const i = dropoffs.length;
-        dropoffs.push({ id: `dropoff-${i + 1}`, kind: "dropoff", index: i + 1, label: count === 1 ? "配達" : `配達${i + 1}`, completeTime: null, lat: null, lng: null });
+        dropoffs.push({ id: `dropoff-${i + 1}`, kind: "dropoff", index: i + 1, label: dropoffLabel(count, i + 1), completeTime: null, lat: null, lng: null });
       }
       setEditData(normalizeDeliverySteps({ ...editData, orderType: type, stops: [...pickups, ...dropoffs] }));
     };
@@ -2387,7 +2435,7 @@ export default function App() {
       const dropoffs = stops.filter(s => s.kind === "dropoff");
       const nextStops = [
         ...pickups,
-        { id: `pickup-${nextCount}`, kind: "pickup", index: nextCount, label: `店舗${nextCount}`, arrivalTime: null, departTime: null, lat: null, lng: null, weather: null },
+        { id: `pickup-${nextCount}`, kind: "pickup", index: nextCount, label: pickupLabel(nextCount, nextCount), arrivalTime: null, departTime: null, lat: null, lng: null, weather: null },
         ...dropoffs,
       ];
       setEditData(normalizeDeliverySteps({ ...normalized, stops: nextStops }));
@@ -2400,7 +2448,7 @@ export default function App() {
       const nextCount = dropoffs.length + 1;
       setEditData(normalizeDeliverySteps({
         ...normalized,
-        stops: [...stops, { id: `dropoff-${nextCount}`, kind: "dropoff", index: nextCount, label: `配達${nextCount}`, completeTime: null, lat: null, lng: null }],
+        stops: [...stops, { id: `dropoff-${nextCount}`, kind: "dropoff", index: nextCount, label: dropoffLabel(nextCount, nextCount), completeTime: null, lat: null, lng: null }],
       }));
     };
     const deleteEditStop = (stopId) => {
@@ -2483,6 +2531,9 @@ export default function App() {
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
                   <div style={{ fontSize: sz(12), color: T.textMuted }}>詳細ステップ</div>
                   <div style={{ fontSize: sz(10), color: T.textDim }}>押し忘れ補正</div>
+                </div>
+                <div style={{ fontSize: sz(10), color: T.textDim, lineHeight: 1.5, marginBottom: 6 }}>
+                  受取番号とお届け番号は対応ではなく、操作順・配達順です。分析では個別ペアとして使いません。
                 </div>
                 <div style={{ display: "grid", gap: 6 }}>
                   {stops.map((s) => (
@@ -2588,7 +2639,7 @@ export default function App() {
     const row = { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 0", borderBottom: `1px solid ${T.border}` };
     const rowLast = { ...row, borderBottom: "none" };
     return (
-      <div style={{ fontFamily: FN, background: T.bg, minHeight: "100dvh", maxWidth: 430, margin: "0 auto", color: T.text, padding: "16px 20px" }}>
+      <div style={{ fontFamily: FN, background: T.bg, minHeight: "100dvh", height: "100dvh", maxWidth: 430, margin: "0 auto", color: T.text, padding: "16px 20px 34px", overflowY: "auto", WebkitOverflowScrolling: "touch", boxSizing: "border-box" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
           <div style={{ fontSize: sz(18), fontWeight: 700 }}>⚙️ 設定</div>
           <button onClick={() => setScreen("main")} style={{ background: "none", border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.textSub, padding: "4px 12px", fontSize: sz(12), cursor: "pointer", fontFamily: FN }}>戻る</button>
@@ -5014,6 +5065,7 @@ export default function App() {
               {Array.isArray(d.stops) && d.stops.length > 0 && (
                 <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginTop: 8, marginBottom: 4 }}>
                   <div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 6 }}>詳細ステップ</div>
+                  <div style={{ fontSize: sz(10), color: T.textDim, lineHeight: 1.5, marginBottom: 6 }}>受取番号とお届け番号は対応ではなく、順番の記録です。</div>
                   <div style={{ display: "grid", gap: 5 }}>
                     {d.stops.map((s, i) => (
                       <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: T.barBg, borderRadius: 7, padding: "6px 8px" }}>
@@ -5787,9 +5839,13 @@ export default function App() {
             <button style={flashBtn("#F59E0B", false, BBH, "storeDepart")} onClick={doStoreDepart}>{label}</button>
             <button style={btn("#EF4444", false, BBH)} onClick={() => openCancel("store_wait")}>調理待ちキャンセル</button>
           </>);
-          if (currentOrderStep.action === "dropoff_complete") return (
-            <button style={flashBtn("#F59E0B", false, BBH, "complete")} onClick={doDropoffComplete}>{label}</button>
-          );
+          if (currentOrderStep.action === "dropoff_complete") {
+            const canAddOrder = (data.currentStops || []).filter(s => s.kind === "pickup").length < 3;
+            return (<>
+              {canAddOrder && <button style={flashBtn("#0EA5E9", false, BBH, "order")} onClick={doAddOrderDuringDelivery}>受注追加</button>}
+              <button style={flashBtn("#F59E0B", false, BBH, "complete")} onClick={doDropoffComplete}>{label}</button>
+            </>);
+          }
           if (currentOrderStep.action === "choose_route") return (<>
             {(data.currentStops || []).filter(s => s.kind === "pickup").length < 3 && (
               <button style={flashBtn("#0EA5E9", false, BBH, "order")} onClick={doNextStore}>次の店舗へ</button>

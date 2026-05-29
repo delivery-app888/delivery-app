@@ -78,7 +78,7 @@ export const newDay = () => ({
   date: tds(), weather: null, sessions: [], breaks: [], deliveries: [], dailyIncentives: [], jizoSessions: [], weatherSamples: [],
   currentSessionStart: null, currentBreakStart: null, currentOrderTime: null, currentJizoStart: null, currentLastActivityAt: null,
   currentStoreArrivalTime: null, currentStoreDepartTime: null, currentOrderPos: null, currentOrderWeather: null, currentStorePos: null, currentStoreWeather: null,
-  currentOrderType: null, currentStops: [],
+  currentOrderType: null, currentStops: [], currentAddedOrderCount: 0,
 });
 export const defaultSettings = () => ({ theme: "dark", incInGoal: true, incInReward: false, largeFont: false, workDays: [1, 2, 3, 4, 5], pickgoFeeRate: 15, rocketBonusRate: 0, autoOfflineHours: 0 });
 
@@ -98,12 +98,31 @@ export const migrate = (d) => {
   if (d.currentStoreWeather === undefined) d.currentStoreWeather = null;
   if (d.currentOrderType === undefined) d.currentOrderType = null;
   if (!Array.isArray(d.currentStops)) d.currentStops = [];
+  if (d.currentAddedOrderCount === undefined) d.currentAddedOrderCount = 0;
   d.deliveries.forEach(dl => {
     if (!dl.orderType) dl.orderType = "single"; if (dl.cancelled === undefined) dl.cancelled = false; if (dl.cancelType === undefined) dl.cancelType = null; if (dl.rating === undefined) dl.rating = null;
     if (dl.startLat === undefined) { dl.startLat = null; dl.startLng = null; dl.endLat = null; dl.endLng = null; }
     if (dl.storeArrivalTime === undefined) dl.storeArrivalTime = null; if (dl.storeDepartTime === undefined) dl.storeDepartTime = null;
     if (dl.storeLat === undefined) { dl.storeLat = null; dl.storeLng = null; }
     if (!Array.isArray(dl.stops)) dl.stops = [];
+    if (dl.stops.length > 0) {
+      const pickups = dl.stops.filter(s => s.kind === "pickup");
+      const dropoffs = dl.stops.filter(s => s.kind === "dropoff");
+      const count = Math.max(1, Math.min(3, Math.max(pickups.length, dropoffs.length)));
+      let pi = 0, di = 0;
+      dl.stops = dl.stops.map(s => {
+        if (s.kind === "pickup") {
+          pi += 1;
+          return { ...s, index: pi, label: count === 1 ? "店舗" : `受取${pi}` };
+        }
+        if (s.kind === "dropoff") {
+          di += 1;
+          return { ...s, index: di, label: count === 1 ? "配達" : `お届け${di}` };
+        }
+        return s;
+      });
+    }
+    if (dl.addedOrderCount === undefined) dl.addedOrderCount = 0;
     if (dl.rocketBonusRate === undefined) dl.rocketBonusRate = 0;
     if (dl.apiWeather === undefined) dl.apiWeather = null; if (dl.storeWeather === undefined) dl.storeWeather = null; if (dl.areaName === undefined) dl.areaName = null; if (dl.memo === undefined) dl.memo = "";
   });
@@ -111,9 +130,26 @@ export const migrate = (d) => {
     const type = d.currentOrderType || "single";
     const count = type === "triple" ? 3 : type === "double" ? 2 : 1;
     d.currentStops = [
-      ...Array.from({ length: count }, (_, i) => ({ id: `pickup-${i + 1}`, kind: "pickup", index: i + 1, label: count === 1 ? "店舗" : `店舗${i + 1}`, arrivalTime: i === 0 ? d.currentStoreArrivalTime : null, departTime: i === 0 ? d.currentStoreDepartTime : null, lat: i === 0 ? d.currentStorePos?.lat ?? null : null, lng: i === 0 ? d.currentStorePos?.lng ?? null : null, weather: i === 0 ? d.currentStoreWeather || null : null })),
-      ...Array.from({ length: count }, (_, i) => ({ id: `dropoff-${i + 1}`, kind: "dropoff", index: i + 1, label: count === 1 ? "配達" : `配達${i + 1}`, completeTime: null, lat: null, lng: null })),
+      ...Array.from({ length: count }, (_, i) => ({ id: `pickup-${i + 1}`, kind: "pickup", index: i + 1, label: count === 1 ? "店舗" : `受取${i + 1}`, arrivalTime: i === 0 ? d.currentStoreArrivalTime : null, departTime: i === 0 ? d.currentStoreDepartTime : null, lat: i === 0 ? d.currentStorePos?.lat ?? null : null, lng: i === 0 ? d.currentStorePos?.lng ?? null : null, weather: i === 0 ? d.currentStoreWeather || null : null })),
+      ...Array.from({ length: count }, (_, i) => ({ id: `dropoff-${i + 1}`, kind: "dropoff", index: i + 1, label: count === 1 ? "配達" : `お届け${i + 1}`, completeTime: null, lat: null, lng: null })),
     ];
+  }
+  if (d.currentStops.length > 0) {
+    const pickups = d.currentStops.filter(s => s.kind === "pickup");
+    const dropoffs = d.currentStops.filter(s => s.kind === "dropoff");
+    const count = Math.max(1, Math.min(3, Math.max(pickups.length, dropoffs.length)));
+    let pi = 0, di = 0;
+    d.currentStops = d.currentStops.map(s => {
+      if (s.kind === "pickup") {
+        pi += 1;
+        return { ...s, index: pi, label: count === 1 ? "店舗" : `受取${pi}` };
+      }
+      if (s.kind === "dropoff") {
+        di += 1;
+        return { ...s, index: di, label: count === 1 ? "配達" : `お届け${di}` };
+      }
+      return s;
+    });
   }
   if (d.weatherSamples.length === 0) {
     d.deliveries.forEach(dl => {
