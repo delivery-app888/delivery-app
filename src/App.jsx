@@ -72,7 +72,11 @@ export default function App() {
   const [goalModal, setGoalModal] = useState(false); const [goalInput, setGoalInput] = useState("");
   const [avgPeriod, setAvgPeriod] = useState("all"); // today | week | month | all
   const [anaOpen, setAnaOpen] = useState(false);
-  const [isPremium] = useState(true); // テスト用: false に戻すとプレミアム制限が復活
+  const [isPremium] = useState(() => (
+    import.meta.env.DEV &&
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("premium") === "1"
+  ));
   // heatmap
   const [hmPeriod, setHmPeriod] = useState("today");
   const [hmCenter, setHmCenter] = useState(null);
@@ -267,6 +271,22 @@ export default function App() {
     const s = await ls();
     const loadedSettings = { ...defaultSettings(), ...(s || {}) };
     setSettings(loadedSettings);
+    if (import.meta.env.DEV && typeof window !== "undefined") {
+      const fixtureName = new URLSearchParams(window.location.search).get("fixture");
+      if (fixtureName) {
+        try {
+          const { generateTestFixture } = await import("./testFixtures.js");
+          const fixture = generateTestFixture(fixtureName);
+          setData(migrate(fixture.todayLog));
+          setAllLogs((fixture.logs || []).map(migrate).filter(l => l.date !== today));
+          setTutorial(false);
+          setLoading(false);
+          return;
+        } catch (err) {
+          console.error("[testFixture] load failed:", err);
+        }
+      }
+    }
     const autoLimitMs = autoOfflineMsFor(loadedSettings);
     const saved = await lt();
     let todayData = saved ? migrate(saved) : null;
@@ -2145,21 +2165,21 @@ export default function App() {
 
   // ─── Menu overlay ───
   const anaItems = [
-    { key: "daily", label: "📋 デイリーレポート", free: true },
+    { key: "daily", label: "📋 今日どう動く", free: true },
+    { key: "efficiency", label: "🎯 案件判断", free: true },
+    { key: "heatmap", label: "📍 受注エリア", free: true },
+    { key: "storewait", label: "🏪 店舗待機リスク", free: true },
+    { key: "hourwage", label: "🧭 稼働時間", free: false },
+    { key: "company", label: "🏢 会社別", free: true },
     { key: "sales", label: "💴 売上集計", free: true },
-    { key: "efficiency", label: "🎯 効率化ポイント", free: true },
-    { key: "heatmap", label: "📍 注文ヒートマップ", free: true },
-    { key: "storewait", label: "🏪 店舗待機マップ", free: true },
-    { key: "highvalue", label: "💎 高単価配達マップ", free: true },
-    { key: "hourly", label: "⏰ 時間帯分析", free: true },
-    { key: "hourwage", label: "🧭 曜日×時間 時給表", free: false },
-    { key: "area", label: "🗺️ エリア別分析", free: false },
-    { key: "condition", label: "🌡️ 気象コンディション分析", free: false },
-    { key: "weekday", label: "📅 曜日分析", free: true },
-    { key: "company", label: "🏢 会社別分析", free: true },
-    { key: "weather", label: "🌤️ 天候分析", free: false },
-    { key: "trends", label: "📈 推移（週次/月次）", free: false },
-    { key: "unitprice", label: "💰 平均単価", free: true },
+    { key: "highvalue", label: "💎 高単価マップ", free: true },
+    { key: "area", label: "🗺️ エリア別", free: false },
+    { key: "condition", label: "🌡️ 気象条件", free: false },
+    { key: "trends", label: "📈 推移・季節", free: false },
+    { key: "hourly", label: "⏰ 時間帯詳細", free: true },
+    { key: "weekday", label: "📅 曜日詳細", free: true },
+    { key: "weather", label: "🌤️ 天候詳細", free: false },
+    { key: "unitprice", label: "💰 単価詳細", free: true },
   ];
   const MenuEl = menu && (
     <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 200 }} onClick={() => { setMenu(false); setAnaOpen(false); }}>
@@ -3170,7 +3190,7 @@ export default function App() {
       return `rgba(34, 197, 94, ${strength})`;
     };
     return (
-      <AnaPage title="🧭 曜日×時間 時給表">
+      <AnaPage title="🧭 稼働時間">
         <div style={{ display: "flex", gap: 3, marginBottom: 10, background: T.barBg, borderRadius: 10, padding: 3 }}>
           {HW_PERIODS.map(p => {
             const active = hwPeriod === p.key;
@@ -3293,7 +3313,7 @@ export default function App() {
     );
 
     return (
-      <AnaPage title="⏰ 時間帯分析" onClick={() => setHrDropdown(null)}>
+      <AnaPage title="⏰ 時間帯詳細" onClick={() => setHrDropdown(null)}>
         <div style={{ display: "flex", gap: 3, marginBottom: 8, background: T.barBg, borderRadius: 10, padding: 3 }}>
           {HR_PERIODS.map(p => {
             const active = hrPeriod === p.key;
@@ -3467,7 +3487,7 @@ export default function App() {
     );
 
     return (
-      <AnaPage title="📅 曜日分析" onClick={() => setWdDropdown(null)}>
+      <AnaPage title="📅 曜日詳細" onClick={() => setWdDropdown(null)}>
         <div style={{ display: "flex", gap: 3, marginBottom: 8, background: T.barBg, borderRadius: 10, padding: 3 }}>
           {WD_PERIODS.map(p => {
             const active = wdPeriod === p.key;
@@ -3611,7 +3631,7 @@ export default function App() {
     );
 
     return (
-      <AnaPage title="🏢 会社別分析" onClick={() => setCoDropdown(null)}>
+      <AnaPage title="🏢 会社別" onClick={() => setCoDropdown(null)}>
         {/* Period pills */}
         <div style={{ display: "flex", gap: 3, marginBottom: 8, background: T.barBg, borderRadius: 10, padding: 3 }}>
           {CO_PERIODS.map(p => {
@@ -3709,7 +3729,7 @@ export default function App() {
       return { name: `${w.icon}${w.label}`, 売上: rev, 時給: wkM > 0 ? Math.round(rev / (wkM / 3600000)) : 0, 件数: ds.reduce((s, d) => s + dc(d), 0) };
     });
     return (
-      <AnaPage title="🌤️ 天候分析">
+      <AnaPage title="🌤️ 天候詳細">
         <PremiumBlur>
           <div style={aC}>
             <div style={aT2}>天候別 時給</div>
@@ -3828,7 +3848,7 @@ export default function App() {
     );
 
     return (
-      <AnaPage title="🌡️ 気象コンディション分析">
+      <AnaPage title="🌡️ 気象条件">
         <PremiumBlur>
           <div style={aC}>
             <div style={aT2}>実測雨量データ</div>
@@ -3880,7 +3900,7 @@ export default function App() {
       return { name: `${d2.getMonth()+1}月`, 売上: ds.reduce((s, d3) => s + (d3.reward || 0), 0) };
     });
     return (
-      <AnaPage title="📈 売上推移">
+      <AnaPage title="📈 推移・季節">
         <PremiumBlur>
           <div style={aC}>
             <div style={aT2}>週別 売上推移</div>
@@ -3986,7 +4006,7 @@ export default function App() {
     );
 
     return (
-      <AnaPage title="💰 平均単価" onClick={() => setUpDropdown(null)}>
+      <AnaPage title="💰 単価詳細" onClick={() => setUpDropdown(null)}>
         {/* Period pills */}
         <div style={{ display: "flex", gap: 3, marginBottom: 8, background: T.barBg, borderRadius: 10, padding: 3 }}>
           {UP_PERIODS.map(p => {
@@ -4074,13 +4094,16 @@ export default function App() {
   if (anaScreen === "efficiency") {
     const todayDate2 = tds();
     const isHoliday = (dateStr) => { const d = new Date(dateStr + "T00:00:00"); const dow = d.getDay(); return dow === 0 || dow === 6; };
-    const TIME_SLOTS_EF = [
-      { key: "morning", label: "朝", min: 6, max: 10 },
-      { key: "lunch", label: "昼", min: 11, max: 14 },
-      { key: "afternoon", label: "午後", min: 15, max: 17 },
-      { key: "dinner", label: "夜", min: 18, max: 23 },
+    const PEAK_SLOTS_EF = [
+      { key: "lunch", label: "昼ピーク", shortLabel: "昼", min: 11, max: 13 },
+      { key: "dinner", label: "夜ピーク", shortLabel: "夜", min: 18, max: 21 },
+      { key: "late", label: "深夜ピーク", shortLabel: "深夜", min: 1, max: 4 },
     ];
-    const getSlot = (ts) => { if (!ts) return null; const h = new Date(ts).getHours(); return TIME_SLOTS_EF.find(s => h >= s.min && h <= s.max)?.key || null; };
+    const TIME_SLOTS_EF = [
+      ...PEAK_SLOTS_EF,
+      { key: "offpeak", label: "オフピーク", shortLabel: "オフ" },
+    ];
+    const getSlot = (ts) => { if (!ts) return null; const h = new Date(ts).getHours(); return PEAK_SLOTS_EF.find(s => h >= s.min && h <= s.max)?.key || "offpeak"; };
     const getDayType = (dateStr) => isHoliday(dateStr) ? "holiday" : "weekday";
 
     // Median helper
@@ -4113,6 +4136,95 @@ export default function App() {
     // Monthly work hours for impact calculation
     const monthlyWorkMs = (() => { let total = 0, days = 0; allLogs.forEach(l => { const ses = (l.sessions || []).reduce((s, x) => s + ((x.end || 0) - x.start), 0); const brk = (l.breaks || []).reduce((s, b) => s + ((b.end || 0) - (b.start || 0)), 0); if (ses > 0) { total += ses - brk; days++; } }); return days > 0 ? total / days * 30 : 0; })();
     const monthlyWorkH = monthlyWorkMs / 3600000;
+    const roundUp5 = (v) => Math.max(1, Math.ceil((v || 0) / 5) * 5);
+    const longMinThreshold = 45;
+    const remoteMinThreshold = 60;
+    const decisionDels = isPremium ? allDels2 : recentDels;
+    const decisionScopeLabel = isPremium ? "全期間" : "直近3日";
+    const lockedDecisionCount = Math.max(0, totalCount - decisionDels.length);
+    const allMedianPerMin = decisionDels.length ? median(decisionDels.map(d => d.perMin)) : 0;
+    const currentSlotKey = getSlot(Date.now()) || "offpeak";
+    const currentSlotLabel = TIME_SLOTS_EF.find(s => s.key === currentSlotKey)?.label || "現在";
+    const slotDecisionStats = TIME_SLOTS_EF.map(slot => {
+      const dels = decisionDels.filter(d => d._slot === slot.key);
+      const shortDels = dels.filter(d => d.durMin < longMinThreshold);
+      const longDels = dels.filter(d => d.durMin >= longMinThreshold);
+      const remoteDels = dels.filter(d => d.durMin >= remoteMinThreshold);
+      const med = dels.length ? median(dels.map(d => d.perMin)) : 0;
+      const shortMed = shortDels.length ? median(shortDels.map(d => d.perMin)) : 0;
+      const longMed = longDels.length ? median(longDels.map(d => d.perMin)) : 0;
+      const targetBase = slot.key === "offpeak" ? med : Math.max(med, shortMed || med);
+      return {
+        ...slot,
+        count: dels.length,
+        med,
+        shortMed,
+        longMed,
+        longCount: longDels.length,
+        remoteCount: remoteDels.length,
+        target: roundUp5(targetBase),
+        longTarget: roundUp5(slot.key === "offpeak" ? Math.max(targetBase, med * 1.05) : Math.max(targetBase * 1.25, targetBase + 10)),
+      };
+    });
+    const currentSlotStats = slotDecisionStats.find(s => s.key === currentSlotKey) || slotDecisionStats[0];
+    const slotComment = (s) => {
+      if (!s || s.count < 8) return "まだ傾向を見るには件数が少なめです。";
+      if (s.key === "offpeak") return `ロング候補は¥${s.longTarget}/分以上なら検討。`;
+      if (s.longCount >= 3 && s.longMed > 0 && s.longMed < s.shortMed) return `ロングは短距離より¥${Math.round(s.shortMed - s.longMed)}/分低め。高単価だけ残す。`;
+      return `ピークは短距離回転を優先。ロングは¥${s.longTarget}/分以上が目安。`;
+    };
+    const storeWaitEntriesFor = (d2, date) => {
+      const pickupStops = (d2.stops || []).filter(s => s.kind === "pickup" && s.arrivalTime);
+      if (pickupStops.length > 0) {
+        return pickupStops.map(s => ({
+          _date: date,
+          company: d2.company,
+          orderTime: d2.orderTime,
+          arrivalTime: s.arrivalTime,
+          departTime: s.departTime || null,
+          completeTime: d2.completeTime || null,
+        }));
+      }
+      if (d2.storeArrivalTime) {
+        return [{
+          _date: date,
+          company: d2.company,
+          orderTime: d2.orderTime,
+          arrivalTime: d2.storeArrivalTime,
+          departTime: d2.storeDepartTime || null,
+          completeTime: d2.completeTime || null,
+        }];
+      }
+      return [];
+    };
+    const allWaitEntries2 = [
+      ...allLogs.flatMap(l => (l.deliveries || []).flatMap(d => storeWaitEntriesFor(d, l.date))),
+      ...data.deliveries.flatMap(d => storeWaitEntriesFor(d, data.date)),
+    ].map(e => {
+      const waitMs = Math.max(0, ((e.departTime || e.completeTime || Date.now()) - e.arrivalTime));
+      return { ...e, waitMin: waitMs / 60000 };
+    }).filter(e => Number.isFinite(e.waitMin) && e.waitMin >= 0);
+    const decisionWaitEntries2 = isPremium ? allWaitEntries2 : allWaitEntries2.filter(e => e._date >= threeDaysAgo);
+    const waitTotal2 = decisionWaitEntries2.length;
+    const wait5Count = decisionWaitEntries2.filter(e => e.waitMin >= 5).length;
+    const wait10Count = decisionWaitEntries2.filter(e => e.waitMin >= 10).length;
+    const waitMedian2 = waitTotal2 ? median(decisionWaitEntries2.map(e => e.waitMin)) : 0;
+    const waitRiskLabel = waitTotal2 === 0 ? "未記録" : wait10Count / waitTotal2 >= 0.2 ? "強め" : wait5Count / waitTotal2 >= 0.25 ? "注意" : "低め";
+    const companySlotStats = TIME_SLOTS_EF.map(slot => {
+      const dels = decisionDels.filter(d => d._slot === slot.key);
+      const rows = COS.map(co => {
+        const coDels = dels.filter(d => d.company === co.id);
+        return {
+          id: co.id,
+          name: co.name,
+          count: coDels.length,
+          med: coDels.length ? median(coDels.map(d => d.perMin)) : 0,
+          share: dels.length ? coDels.length / dels.length : 0,
+        };
+      }).filter(r => r.count > 0).sort((a, b) => b.count - a.count);
+      return { ...slot, total: dels.length, rows };
+    });
+    const companyBiasTargets = companySlotStats.filter(s => s.total >= 8).slice(0, 3);
 
     // ─── Rule detection function ───
     // useDayType: true=平日/土日祝で分ける(PRO), false=分けない(無料)
@@ -4293,7 +4405,130 @@ export default function App() {
     };
 
     return (
-      <AnaPage title="🎯 効率化ポイント">
+      <AnaPage title="🎯 案件判断">
+        <div style={aC}>
+          <div style={{ fontSize: sz(14), fontWeight: 800, color: T.text, marginBottom: 6 }}>受注前に見る目安</div>
+          <div style={{ fontSize: sz(11), color: T.textDim, lineHeight: 1.6, marginBottom: 10 }}>
+            評価の中心は分単価です。ピークは短距離回転、オフピークはボーダー以上ならロングも検討する前提で見ます。
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <div style={{ background: T.barBg, borderRadius: 8, padding: "10px 8px", textAlign: "center" }}>
+              <div style={{ fontSize: sz(10), color: T.textDim }}>現在の時間帯</div>
+              <div style={{ fontSize: sz(17), fontWeight: 800, color: T.accent }}>{currentSlotLabel}</div>
+              <div style={{ fontSize: sz(10), color: T.textMuted }}>{currentSlotStats?.count || 0}件の履歴</div>
+            </div>
+            <div style={{ background: T.barBg, borderRadius: 8, padding: "10px 8px", textAlign: "center" }}>
+              <div style={{ fontSize: sz(10), color: T.textDim }}>{decisionScopeLabel}の中央分給</div>
+              <div style={{ fontSize: sz(17), fontWeight: 800, color: "#22C55E" }}>¥{Math.round(allMedianPerMin)}<span style={{ fontSize: sz(10) }}>/分</span></div>
+              <div style={{ fontSize: sz(10), color: T.textMuted }}>{decisionDels.length}件</div>
+            </div>
+          </div>
+          <div style={{ marginTop: 10, background: T.inputBg, border: `1px solid ${T.border}`, borderRadius: 8, padding: "8px 10px", fontSize: sz(11), color: T.textSub, lineHeight: 1.55 }}>
+            暫定ルール: 45分以上をロング候補、60分以上を戻りコストが重い案件として扱います。
+          </div>
+          {!isPremium && lockedDecisionCount > 0 && (
+            <div style={{ marginTop: 10, background: `${T.purple}12`, border: `1px solid ${T.purple}44`, borderRadius: 9, padding: "10px 12px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", marginBottom: 4 }}>
+                <div style={{ fontSize: sz(12), fontWeight: 800, color: T.text }}>PROで全期間の案件判断</div>
+                <div style={{ fontSize: sz(10), fontWeight: 700, color: T.purple }}>+{lockedDecisionCount}件</div>
+              </div>
+              <div style={{ fontSize: sz(11), color: T.textSub, lineHeight: 1.55 }}>
+                無料版は直近3日で今日の判断。PROでは全期間を使って、曜日差・季節差・会社別の癖まで含めた自分専用ボーダーを表示します。
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div style={aC}>
+          <div style={aT2}>時間帯別の受注ボーダー</div>
+          {slotDecisionStats.map((s, i) => (
+            <div key={s.key} style={{ padding: "9px 0", borderTop: i > 0 ? `1px solid ${T.border}` : "none" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", marginBottom: 4 }}>
+                <div style={{ fontSize: sz(13), fontWeight: 700, color: T.text }}>{s.label}</div>
+                <div style={{ fontSize: sz(11), color: T.textDim }}>{s.count}件</div>
+              </div>
+              {s.count > 0 ? (
+                <>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 6 }}>
+                    <div style={{ background: T.barBg, borderRadius: 7, padding: "7px 6px", textAlign: "center" }}>
+                      <div style={{ fontSize: sz(9), color: T.textDim }}>中央値</div>
+                      <div style={{ fontSize: sz(13), fontWeight: 800, color: T.text }}>¥{Math.round(s.med)}</div>
+                    </div>
+                    <div style={{ background: "#22C55E18", borderRadius: 7, padding: "7px 6px", textAlign: "center" }}>
+                      <div style={{ fontSize: sz(9), color: "#22C55E" }}>基本</div>
+                      <div style={{ fontSize: sz(13), fontWeight: 800, color: "#22C55E" }}>¥{s.target}/分</div>
+                    </div>
+                    <div style={{ background: "#F59E0B18", borderRadius: 7, padding: "7px 6px", textAlign: "center" }}>
+                      <div style={{ fontSize: sz(9), color: "#F59E0B" }}>ロング</div>
+                      <div style={{ fontSize: sz(13), fontWeight: 800, color: "#F59E0B" }}>¥{s.longTarget}/分</div>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                    <div style={{ fontSize: sz(11), color: T.textSub, lineHeight: 1.5 }}>{slotComment(s)}</div>
+                    <div style={{ fontSize: sz(10), color: T.textDim, whiteSpace: "nowrap" }}>45分+ {s.longCount}件 / 60分+ {s.remoteCount}件</div>
+                  </div>
+                </>
+              ) : (
+                <div style={{ fontSize: sz(11), color: T.textDim }}>この時間帯の履歴がまだありません</div>
+              )}
+            </div>
+          ))}
+        </div>
+
+        <div style={aC}>
+          <div style={aT2}>店舗待機リスク</div>
+          {waitTotal2 === 0 ? (
+            <div style={{ fontSize: sz(12), color: T.textDim, lineHeight: 1.6 }}>店舗到着・出発の記録が増えると、待ちやすい案件を避ける判断に使えます。</div>
+          ) : (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
+                <div style={{ background: T.barBg, borderRadius: 8, padding: "9px 6px", textAlign: "center" }}>
+                  <div style={{ fontSize: sz(9), color: T.textDim }}>リスク</div>
+                  <div style={{ fontSize: sz(15), fontWeight: 800, color: waitRiskLabel === "強め" ? "#EF4444" : waitRiskLabel === "注意" ? "#F59E0B" : "#22C55E" }}>{waitRiskLabel}</div>
+                </div>
+                <div style={{ background: T.barBg, borderRadius: 8, padding: "9px 6px", textAlign: "center" }}>
+                  <div style={{ fontSize: sz(9), color: T.textDim }}>5分以上</div>
+                  <div style={{ fontSize: sz(15), fontWeight: 800, color: T.text }}>{Math.round(wait5Count / waitTotal2 * 100)}%</div>
+                </div>
+                <div style={{ background: T.barBg, borderRadius: 8, padding: "9px 6px", textAlign: "center" }}>
+                  <div style={{ fontSize: sz(9), color: T.textDim }}>10分以上</div>
+                  <div style={{ fontSize: sz(15), fontWeight: 800, color: T.text }}>{Math.round(wait10Count / waitTotal2 * 100)}%</div>
+                </div>
+              </div>
+              <div style={{ fontSize: sz(11), color: T.textSub, lineHeight: 1.55 }}>
+                待機中央値は{Math.round(waitMedian2 * 10) / 10}分。ピーク中は5分待ちでも回転率を削るので、店舗待機マップとセットで見てください。
+              </div>
+            </>
+          )}
+        </div>
+
+        <div style={aC}>
+          <div style={aT2}>会社の使い分け</div>
+          {companyBiasTargets.length === 0 ? (
+            <div style={{ fontSize: sz(12), color: T.textDim, lineHeight: 1.6 }}>時間帯ごとの会社比較は、各ピークで8件以上の履歴があると見え始めます。</div>
+          ) : (
+            <>
+              {companyBiasTargets.map((s, i) => (
+                <div key={s.key} style={{ padding: "8px 0", borderTop: i > 0 ? `1px solid ${T.border}` : "none" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 4 }}>
+                    <div style={{ fontSize: sz(12), color: T.text, fontWeight: 700 }}>{s.label}</div>
+                    <div style={{ fontSize: sz(10), color: T.textDim }}>{s.total}件</div>
+                  </div>
+                  {s.rows.slice(0, 3).map(r => (
+                    <div key={r.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: sz(11), color: T.textSub, padding: "2px 0" }}>
+                      <span>{r.name} {Math.round(r.share * 100)}%</span>
+                      <span style={{ color: T.text }}>¥{Math.round(r.med)}/分</span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+              <div style={{ fontSize: sz(10), color: T.textFaint, lineHeight: 1.5, marginTop: 4 }}>
+                受注済みデータなので、未受注の機会損失は断定しません。偏りを見つけるための入口です。
+              </div>
+            </>
+          )}
+        </div>
+
         {/* Data collection progress */}
         {anaLevel < 3 && (
           <div style={aC}>
@@ -4324,7 +4559,7 @@ export default function App() {
         )}
         {/* Free: Recent 3 days summary */}
         <div style={aC}>
-          <div style={aT2}>直近3日の効率分析</div>
+          <div style={aT2}>直近3日の判断メモ</div>
           {recentDels.length === 0 ? (
             <div style={{ fontSize: sz(12), color: T.textDim, textAlign: "center", padding: "12px 0" }}>配達データがありません</div>
           ) : recentDels.length < 15 ? (
@@ -4343,7 +4578,7 @@ export default function App() {
               </div>
               {recentRules.length > 0 ? (
                 <>
-                  <div style={{ fontSize: sz(11), color: "#F59E0B", fontWeight: 600, marginBottom: 6 }}>⚠ 改善ポイント</div>
+                  <div style={{ fontSize: sz(11), color: "#F59E0B", fontWeight: 600, marginBottom: 6 }}>⚠ 受注で注意する条件</div>
                   {recentRules.slice(0, 3).map((r, i) => (
                     <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "6px 0", borderTop: i > 0 ? `1px solid ${T.border}` : "none" }}>
                       <span style={{ fontSize: sz(12), color: T.text }}>{r.icon} {ruleAction(r)}</span>
@@ -4354,7 +4589,7 @@ export default function App() {
               ) : (
                 <div style={{ fontSize: sz(12), color: "#22C55E", textAlign: "center", fontWeight: 600 }}>効率的に配達できています</div>
               )}
-              <div style={{ fontSize: sz(9), color: T.textFaint, textAlign: "center", marginTop: 8, lineHeight: 1.5 }}>📊 直近3日のデータに基づく分析です（平日/土日祝の区別なし）</div>
+              <div style={{ fontSize: sz(9), color: T.textFaint, textAlign: "center", marginTop: 8, lineHeight: 1.5 }}>📊 直近3日のデータに基づく判断メモです（平日/土日祝の区別なし）</div>
             </>
           )}
         </div>
@@ -4365,7 +4600,7 @@ export default function App() {
             {/* My Rules */}
             {allRules.length > 0 && (
               <div style={{ ...aC, background: T === LIGHT ? "#FFFBEB" : "#1A1810", border: `1px solid ${T === LIGHT ? "#FDE68A" : "#42381A"}` }}>
-                <div style={{ fontSize: sz(14), fontWeight: 700, color: "#F59E0B", marginBottom: 8 }}>📋 あなたの効率化ルール</div>
+                <div style={{ fontSize: sz(14), fontWeight: 700, color: "#F59E0B", marginBottom: 8 }}>📋 あなたの案件判断ルール</div>
                 {allRules.slice(0, 5).map((r, i) => (
                   <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderTop: i > 0 ? `1px solid ${T === LIGHT ? "#FDE68A44" : "#42381A"}` : "none" }}>
                     <div>
@@ -4382,7 +4617,7 @@ export default function App() {
             )}
 
             {/* Detailed cards */}
-            <div style={{ fontSize: sz(12), color: T.textDim, fontWeight: 600, marginBottom: 6, marginTop: 4 }}>詳細分析</div>
+            <div style={{ fontSize: sz(12), color: T.textDim, fontWeight: 600, marginBottom: 6, marginTop: 4 }}>詳細ルール</div>
             {allRules.length > 0 ? allRules.map((r, i) => <RuleCard key={i} rule={r} />) : (
               <div style={{ ...aC, textAlign: "center" }}>
                 <div style={{ fontSize: sz(13), color: "#22C55E", fontWeight: 700 }}>大きな非効率パターンは検出されませんでした</div>
@@ -4394,7 +4629,7 @@ export default function App() {
             {/* Free: Concrete advice from detected rules */}
             {allRules.length > 0 && (
               <div style={aC}>
-                <div style={{ fontSize: sz(13), fontWeight: 700, color: T.text, marginBottom: 8 }}>💡 改善アドバイス</div>
+                <div style={{ fontSize: sz(13), fontWeight: 700, color: T.text, marginBottom: 8 }}>💡 受注アドバイス</div>
                 {allRules.slice(0, 2).map((r, i) => {
                   return (
                     <div key={i} style={{ padding: "8px 0", borderTop: i > 0 ? `1px solid ${T.border}` : "none" }}>
@@ -4409,7 +4644,7 @@ export default function App() {
               <div style={{ position: "relative", marginBottom: 8 }}>
                 <PremiumBlur>
                   <div style={{ ...aC, background: T === LIGHT ? "#FFFBEB" : "#1A1810" }}>
-                    <div style={{ fontSize: sz(14), fontWeight: 700, color: "#F59E0B", marginBottom: 8 }}>📋 あなたの効率化ルール</div>
+                    <div style={{ fontSize: sz(14), fontWeight: 700, color: "#F59E0B", marginBottom: 8 }}>📋 あなたの案件判断ルール</div>
                     {allRules.slice(0, 3).map((_, i) => (
                       <div key={i} style={{ padding: "10px 0", borderTop: i > 0 ? `1px solid ${T === LIGHT ? "#FDE68A44" : "#42381A"}` : "none" }}>
                         <div style={{ height: 14, background: T.barBg, borderRadius: 4, width: "70%" }} />
@@ -4429,7 +4664,7 @@ export default function App() {
             {allRules.length === 0 && (
               <PremiumBlur>
                 <div style={{ ...aC, background: T === LIGHT ? "#FFFBEB" : "#1A1810" }}>
-                  <div style={{ fontSize: sz(14), fontWeight: 700, color: "#F59E0B", marginBottom: 8 }}>📋 あなたの効率化ルール</div>
+                  <div style={{ fontSize: sz(14), fontWeight: 700, color: "#F59E0B", marginBottom: 8 }}>📋 あなたの案件判断ルール</div>
                   <div style={{ padding: "20px 0" }} />
                 </div>
               </PremiumBlur>
@@ -4681,7 +4916,7 @@ export default function App() {
     return (
       <div style={{ background: T.bg, height: "100dvh", maxWidth: 430, margin: "0 auto", fontFamily: FN, color: T.text }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px 8px", height: 48 }}>
-          <div style={{ fontSize: sz(17), fontWeight: 700 }}>💎 高単価配達マップ</div>
+          <div style={{ fontSize: sz(17), fontWeight: 700 }}>💎 高単価マップ</div>
           <button style={{ background: "none", border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.textSub, padding: "4px 10px", fontSize: sz(12), cursor: "pointer", fontFamily: FN }} onClick={() => setScreen("main")}>戻る</button>
         </div>
         <div style={{ height: "calc(100dvh - 48px)", position: "relative", borderTop: `1px solid ${T.border}` }}>
@@ -4775,7 +5010,7 @@ export default function App() {
       <div style={{ background: T.bg, height: "100dvh", maxWidth: 430, margin: "0 auto", fontFamily: FN, color: T.text }}
         onClick={() => setSwDropdown(null)}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px 8px", height: 48 }}>
-          <div style={{ fontSize: sz(17), fontWeight: 700 }}>🏪 店舗待機マップ</div>
+          <div style={{ fontSize: sz(17), fontWeight: 700 }}>🏪 店舗待機リスク</div>
           <button style={{ background: "none", border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.textSub, padding: "4px 10px", fontSize: sz(12), cursor: "pointer", fontFamily: FN }} onClick={() => setScreen("main")}>戻る</button>
         </div>
         <div style={{ height: "calc(100dvh - 48px)", position: "relative", borderTop: `1px solid ${T.border}` }}>
@@ -4934,7 +5169,7 @@ export default function App() {
         onClick={() => setHmDropdown(null)}>
         {/* Header */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px 8px", height: 48 }}>
-          <div style={{ fontSize: sz(17), fontWeight: 700 }}>📍 注文ヒートマップ</div>
+          <div style={{ fontSize: sz(17), fontWeight: 700 }}>📍 受注エリア</div>
           <button style={{ background: "none", border: `1px solid ${T.borderLight}`, borderRadius: 7, color: T.textSub, padding: "4px 10px", fontSize: sz(12), cursor: "pointer", fontFamily: FN }} onClick={() => setScreen("main")}>戻る</button>
         </div>
         <div style={{ height: "calc(100dvh - 48px)", position: "relative", borderTop: `1px solid ${T.border}` }}>
