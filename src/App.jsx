@@ -183,7 +183,11 @@ export default function App() {
   const [histWorkEdit, setHistWorkEdit] = useState(null);
   const [histIncEdit, setHistIncEdit] = useState(null);
   const [actionToast, setActionToast] = useState(null);
+  const [pendingUndo, setPendingUndo] = useState(null);
   const [csvExport, setCsvExport] = useState(null);
+  const undoTimerRef = useRef(null);
+  const undoSeqRef = useRef(0);
+  const pendingUndoRef = useRef(null);
 
 
   const T = settings.theme === "light" ? LIGHT : DARK;
@@ -347,6 +351,41 @@ export default function App() {
   const saveRef = useRef(null);
   useEffect(() => { if (loading) return; if (saveRef.current) clearTimeout(saveRef.current); saveRef.current = setTimeout(() => sv(data), 300); }, [data, loading]);
   const update = useCallback((fn) => { setData(p => { const n = { ...p, sessions: [...p.sessions], breaks: [...p.breaks], deliveries: [...p.deliveries], dailyIncentives: [...p.dailyIncentives], jizoSessions: [...p.jizoSessions], weatherSamples: [...(p.weatherSamples || [])], currentStops: (p.currentStops || []).map(s => ({ ...s })) }; fn(n); return n; }); }, []);
+  const cloneLog = (log) => JSON.parse(JSON.stringify(log));
+  const clearPendingUndo = useCallback(() => {
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    undoTimerRef.current = null;
+    pendingUndoRef.current = null;
+    setPendingUndo(null);
+  }, []);
+  const beginUndo = useCallback((label, restoreScreen = "main") => {
+    const id = undoSeqRef.current + 1;
+    undoSeqRef.current = id;
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    const item = { id, label, restoreScreen, data: cloneLog(data), createdAt: Date.now() };
+    pendingUndoRef.current = item;
+    setPendingUndo(item);
+    undoTimerRef.current = setTimeout(() => {
+      if (pendingUndoRef.current?.id === id) pendingUndoRef.current = null;
+      setPendingUndo(prev => prev?.id === id ? null : prev);
+    }, 5000);
+    return id;
+  }, [data]);
+  useEffect(() => () => { if (undoTimerRef.current) clearTimeout(undoTimerRef.current); }, []);
+  const doUndo = useCallback(() => {
+    const item = pendingUndoRef.current || pendingUndo;
+    if (!item) return;
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    undoTimerRef.current = null;
+    pendingUndoRef.current = null;
+    setPendingUndo(null);
+    setData(cloneLog(item.data));
+    setRwCo(null); setRwAmt(""); setRwInc(""); setRwField("reward"); setRwRating(null);
+    setCancelType(null); setRwSaving(false);
+    setScreen(item.restoreScreen || "main");
+    setActionToast("↩ 操作を戻しました");
+    setTimeout(() => setActionToast(null), 1400);
+  }, [pendingUndo]);
   const updateSettings = (patch) => { const n = { ...settings, ...patch }; setSettings(n); ss(n); };
   const runAutoOfflineCheck = useCallback(() => {
     const limitMs = autoOfflineMsFor(settings);
@@ -1687,29 +1726,45 @@ export default function App() {
     d.currentStoreArrivalTime = null; d.currentStoreDepartTime = null; d.currentStorePos = null; d.currentStoreWeather = null;
     d.currentOrderType = null; d.currentStops = []; d.currentAddedOrderCount = 0;
   };
-  const openRewardInput = () => {
+  const openRewardInput = ({ skipUndo = false } = {}) => {
+    if (!skipUndo) beginUndo("報酬入力へ");
     setRwCo(null); setRwAmt(""); setRwInc(""); setRwField("reward"); setRwType(data.currentOrderType || "single"); setRwRating(null); setScreen("reward"); pulse("complete");
   };
   const doOrd = () => {
     if (!isOn || isBrk || hasOrd) return;
+    const nowOrder = Date.now();
+    beginUndo("受注");
     if (isJz) update(d => { d.jizoSessions.push({ start: d.currentJizoStart, end: Date.now() }); d.currentJizoStart = null; });
     update(d => {
-      d.currentOrderTime = Date.now();
+      d.currentOrderTime = nowOrder;
       d.currentOrderPos = null; d.currentOrderWeather = null;
       d.currentStoreArrivalTime = null; d.currentStoreDepartTime = null; d.currentStorePos = null; d.currentStoreWeather = null;
       d.currentOrderType = "single";
       d.currentStops = buildPickupStops(1);
       d.currentAddedOrderCount = 0;
     });
-    getPos().then(p => { if (p) { update(d => { d.currentOrderPos = p; }); fetchWeather(p.lat, p.lng).then(w => { if (w) update(d => { d.currentOrderWeather = w; d.weatherSamples.push(makeWeatherSample("order", p, w)); }); }); } });
+    getPos().then(p => {
+      if (p) {
+        update(d => { if (d.currentOrderTime === nowOrder) d.currentOrderPos = p; });
+        fetchWeather(p.lat, p.lng).then(w => {
+          if (w) update(d => {
+            if (d.currentOrderTime !== nowOrder) return;
+            d.currentOrderWeather = w;
+            d.weatherSamples.push(makeWeatherSample("order", p, w));
+          });
+        });
+      }
+    });
     pulse("order");
   };
   const doStoreArrive = () => {
     const step = getNextOrderStep(data.currentStops || []);
     if (!hasOrd || (step && step.action !== "pickup_arrive") || (!step && hasStoreArrived)) return;
+    const orderTime = data.currentOrderTime;
     const targetId = step?.stop?.id || "pickup-1";
     const isFirst = !step || step.stop?.index === 1;
     const nowArrive = Date.now();
+    beginUndo(stepButtonLabel(step, data.currentOrderType || "single") || "店舗到着");
     update(d => {
       d.currentStops = (d.currentStops || []).map(s => s.id === targetId ? { ...s, arrivalTime: nowArrive } : s);
       if (isFirst) d.currentStoreArrivalTime = nowArrive;
@@ -1717,12 +1772,23 @@ export default function App() {
     getPos().then(p => {
       if (p) {
         update(d => {
-          d.currentStops = (d.currentStops || []).map(s => s.id === targetId ? { ...s, lat: p.lat, lng: p.lng } : s);
-          if (isFirst) d.currentStorePos = p;
+          if (d.currentOrderTime !== orderTime) return;
+          let matched = false;
+          d.currentStops = (d.currentStops || []).map(s => {
+            if (s.id === targetId && s.arrivalTime === nowArrive) { matched = true; return { ...s, lat: p.lat, lng: p.lng }; }
+            return s;
+          });
+          if (matched && isFirst) d.currentStorePos = p;
         });
         fetchWeather(p.lat, p.lng).then(w => {
           if (w) update(d => {
-            d.currentStops = (d.currentStops || []).map(s => s.id === targetId ? { ...s, weather: w } : s);
+            if (d.currentOrderTime !== orderTime) return;
+            let matched = false;
+            d.currentStops = (d.currentStops || []).map(s => {
+              if (s.id === targetId && s.arrivalTime === nowArrive) { matched = true; return { ...s, weather: w }; }
+              return s;
+            });
+            if (!matched) return;
             if (isFirst) d.currentStoreWeather = w;
             d.weatherSamples.push(makeWeatherSample(`store_${step?.stop?.index || 1}`, p, w));
           });
@@ -1734,15 +1800,17 @@ export default function App() {
   const doStoreDepart = () => {
     const step = getNextOrderStep(data.currentStops || []);
     if (!hasOrd || (step && step.action !== "pickup_depart") || (!step && (!hasStoreArrived || hasStoreDeparted))) return;
+    const orderTime = data.currentOrderTime;
     const targetId = step?.stop?.id || "pickup-1";
     const isFirst = !step || step.stop?.index === 1;
     const nowDepart = Date.now();
+    beginUndo(stepButtonLabel(step, data.currentOrderType || "single") || "店舗出発");
     update(d => {
       d.currentStops = (d.currentStops || []).map(s => s.id === targetId ? { ...s, departTime: nowDepart } : s);
       if (isFirst) d.currentStoreDepartTime = nowDepart;
     });
     if (!step?.stop?.lat && (!isFirst || !data.currentStorePos)) {
-      getPos().then(p => { if (p) { update(d => { d.currentStops = (d.currentStops || []).map(s => s.id === targetId ? { ...s, lat: s.lat || p.lat, lng: s.lng || p.lng } : s); if (isFirst) d.currentStorePos = d.currentStorePos || p; }); fetchWeather(p.lat, p.lng).then(w => { if (w) update(d => { d.currentStops = (d.currentStops || []).map(s => s.id === targetId ? { ...s, weather: s.weather || w } : s); if (isFirst) d.currentStoreWeather = d.currentStoreWeather || w; d.weatherSamples.push(makeWeatherSample(`store_depart_${step?.stop?.index || 1}`, p, w)); }); }); } });
+      getPos().then(p => { if (p) { update(d => { if (d.currentOrderTime !== orderTime) return; let matched = false; d.currentStops = (d.currentStops || []).map(s => { if (s.id === targetId && s.departTime === nowDepart) { matched = true; return { ...s, lat: s.lat || p.lat, lng: s.lng || p.lng }; } return s; }); if (matched && isFirst) d.currentStorePos = d.currentStorePos || p; }); fetchWeather(p.lat, p.lng).then(w => { if (w) update(d => { if (d.currentOrderTime !== orderTime) return; let matched = false; d.currentStops = (d.currentStops || []).map(s => { if (s.id === targetId && s.departTime === nowDepart) { matched = true; return { ...s, weather: s.weather || w }; } return s; }); if (!matched) return; if (isFirst) d.currentStoreWeather = d.currentStoreWeather || w; d.weatherSamples.push(makeWeatherSample(`store_depart_${step?.stop?.index || 1}`, p, w)); }); }); } });
     }
     pulse("storeDepart");
   };
@@ -1752,6 +1820,7 @@ export default function App() {
     const pickups = (data.currentStops || []).filter(s => s.kind === "pickup");
     if (pickups.length >= 3) return;
     const nextCount = pickups.length + 1;
+    beginUndo(`${pickupLabel(nextCount, nextCount)}へ`);
     update(d => {
       const relabeled = (d.currentStops || []).filter(s => s.kind === "pickup").map((s, i) => ({
         ...s,
@@ -1773,6 +1842,7 @@ export default function App() {
     const dropoffs = stops.filter(s => s.kind === "dropoff");
     const nextCount = Math.max(pickups.length, dropoffs.length) + 1;
     if (nextCount > 3) return;
+    beginUndo(`${pickupLabel(nextCount, nextCount)}を追加`);
     update(d => {
       const current = sanitizeStops(d.currentStops);
       const currentPickups = current.filter(s => s.kind === "pickup");
@@ -1799,6 +1869,7 @@ export default function App() {
     if (!hasOrd || step?.action !== "choose_route") return;
     const pickups = (data.currentStops || []).filter(s => s.kind === "pickup");
     const count = Math.max(1, Math.min(3, pickups.length));
+    beginUndo("配達へ");
     update(d => {
       const relabeledPickups = (d.currentStops || []).filter(s => s.kind === "pickup").map((s, i) => ({
         ...s,
@@ -1814,16 +1885,21 @@ export default function App() {
   const doDropoffComplete = () => {
     const step = getNextOrderStep(data.currentStops || []);
     if (!hasOrd || !step || step.action !== "dropoff_complete") return;
+    const orderTime = data.currentOrderTime;
     const targetId = step.stop.id;
     const isLastDropoff = (data.currentStops || []).filter(s => s.kind === "dropoff").every(s => s.id === targetId || s.completeTime);
     const nowComplete = Date.now();
+    beginUndo(stepButtonLabel(step, data.currentOrderType || "single") || "配達完了");
     update(d => {
       d.currentStops = (d.currentStops || []).map(s => s.id === targetId ? { ...s, completeTime: nowComplete } : s);
     });
     getPos().then(p => {
-      if (p) update(d => { d.currentStops = (d.currentStops || []).map(s => s.id === targetId ? { ...s, lat: p.lat, lng: p.lng } : s); });
+      if (p) update(d => {
+        if (d.currentOrderTime !== orderTime) return;
+        d.currentStops = (d.currentStops || []).map(s => s.id === targetId && s.completeTime === nowComplete ? { ...s, lat: p.lat, lng: p.lng } : s);
+      });
     });
-    if (isLastDropoff) openRewardInput();
+    if (isLastDropoff) openRewardInput({ skipUndo: true });
     else pulse("complete");
   };
   const doCmp = () => {
@@ -1892,6 +1968,7 @@ export default function App() {
         });
       }
       setScreen("main");
+      clearPendingUndo();
       pulse("cancel");
     } finally {
       setRwSaving(false);
@@ -1963,6 +2040,7 @@ export default function App() {
       });
     }
     setScreen("main");
+    clearPendingUndo();
     setRwSaving(false);
 
     // ─── Delivery feedback toast ───
@@ -5664,10 +5742,39 @@ export default function App() {
         </div>
       )}
 
+      {/* ─── Undo Snackbar ─── */}
+      {pendingUndo && (
+        <div style={{
+          position: "fixed",
+          bottom: `calc(${BBH + 48}px + env(safe-area-inset-bottom))`,
+          left: "50%",
+          transform: "translateX(-50%)",
+          zIndex: 380,
+          maxWidth: 398,
+          width: "calc(100% - 32px)",
+          background: T.card,
+          color: T.text,
+          border: `1px solid ${T.accent}55`,
+          borderRadius: 14,
+          padding: "10px 12px",
+          boxShadow: "0 8px 28px #0008",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          fontFamily: FN,
+        }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: sz(11), color: T.textDim, marginBottom: 2 }}>直前操作</div>
+            <div style={{ fontSize: sz(13), fontWeight: 800, color: T.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{pendingUndo.label}</div>
+          </div>
+          <button onClick={doUndo} style={{ height: 38, minWidth: 74, borderRadius: 10, border: "none", background: T.accent, color: "#000", fontSize: sz(13), fontWeight: 800, cursor: "pointer", fontFamily: FN }}>戻す</button>
+        </div>
+      )}
+
       {/* ─── Action Toast (button feedback) ─── */}
       {actionToast && (
         <div style={{
-          position: "fixed", bottom: BBH + 50, left: "50%", transform: "translateX(-50%)",
+          position: "fixed", bottom: pendingUndo ? `calc(${BBH + 108}px + env(safe-area-inset-bottom))` : `calc(${BBH + 50}px + env(safe-area-inset-bottom))`, left: "50%", transform: "translateX(-50%)",
           zIndex: 350, background: T.text, color: T.bg, borderRadius: 12,
           padding: "10px 24px", boxShadow: "0 4px 20px #0006",
           fontSize: sz(15), fontWeight: 700, fontFamily: FN,
@@ -5750,7 +5857,7 @@ export default function App() {
         </div>
       )}
 
-      <div style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch", paddingBottom: BBH + 28 }}>
+      <div style={{ flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch", paddingBottom: BBH + 84 }}>
 
         {/* Header */}
         <div style={{ padding: "10px 16px 4px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -6061,7 +6168,7 @@ export default function App() {
       </div>
 
       {/* Fixed bottom */}
-      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, maxWidth: 430, margin: "0 auto", padding: "10px 16px 18px", background: `linear-gradient(transparent, ${T.bg} 30%)`, display: "flex", gap: 8, zIndex: 50 }}>
+      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, maxWidth: 430, margin: "0 auto", padding: "10px 16px calc(34px + env(safe-area-inset-bottom))", background: `linear-gradient(transparent, ${T.bg} 30%)`, display: "flex", gap: 8, zIndex: 50 }}>
         {!hasOrd ? (
           <button style={flashBtn("#0EA5E9", !isOn || isBrk, BBH, "order")} onClick={doOrd} disabled={!isOn || isBrk}>受注</button>
         ) : currentOrderStep ? (() => {
