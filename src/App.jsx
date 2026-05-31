@@ -61,7 +61,8 @@ export default function App() {
   // reward
   const [rwCo, setRwCo] = useState(null); const [rwAmt, setRwAmt] = useState(""); const [rwInc, setRwInc] = useState(""); const [rwField, setRwField] = useState("reward"); const [rwType, setRwType] = useState("single");
   const [rwRating, setRwRating] = useState(null); // "good"|"normal"|"bad"|null (auto)
-  const [cancelType, setCancelType] = useState(null); // "before_store"|"store_wait"|null
+  const [cancelType, setCancelType] = useState(null); // "before_store"|"store_wait"|"dropoff"|null
+  const [cancelMode, setCancelMode] = useState("finish"); // "finish"|"continue"
   // daily inc
   const [diCo, setDiCo] = useState(null); const [diAmt, setDiAmt] = useState("");
   // edit
@@ -540,7 +541,7 @@ export default function App() {
     filt.forEach(d2 => {
       const c = d2.cancelled ? RC.cancelled : RC[d2.rating] || RC.normal;
       const co2 = escHtml(d2.company || "不明");
-      const rw2 = d2.cancelled ? (d2.cancelType === "before_store" ? "未到着キャンセル" : "調理待ちキャンセル") : `¥${(d2.reward || 0).toLocaleString()}`;
+      const rw2 = d2.cancelled ? cancelTypeLabel(d2.cancelType) : `¥${(d2.reward || 0).toLocaleString()}`;
       const wInfo = d2.apiWeather ? `<br/>${escHtml(d2.apiWeather.temperature)}℃ 風${escHtml(d2.apiWeather.windspeed)}km/h${d2.apiWeather.precipitation != null ? ` 雨${escHtml(d2.apiWeather.precipitation)}mm` : ""}` : "";
       if (d2.startLat && d2.startLng) L.circleMarker([d2.startLat, d2.startLng], { radius: 6, color: c, fillColor: c, fillOpacity: 0.7, weight: 2 }).bindPopup(`<b>受注</b> ${fT(d2.orderTime)}<br/>${co2} ${rw2}${wInfo}`).addTo(hmLayerRef.current);
     });
@@ -958,6 +959,72 @@ export default function App() {
   const sanitizeStops = (stops) => (Array.isArray(stops) ? stops : []).map(s => ({ ...s }));
   const firstPickupStop = (stops) => sanitizeStops(stops).find(s => s.kind === "pickup") || null;
   const lastCompletedDropoffStop = (stops) => [...sanitizeStops(stops)].reverse().find(s => s.kind === "dropoff" && s.completeTime) || null;
+  const cancelTypeLabel = (type) => {
+    if (type === "before_store") return "未到着キャンセル";
+    if (type === "dropoff") return "配達中キャンセル";
+    return "調理待ちキャンセル";
+  };
+  const relabelStops = (stops) => {
+    const list = sanitizeStops(stops);
+    const count = Math.max(1, list.filter(s => s.kind === "pickup").length, list.filter(s => s.kind === "dropoff").length);
+    let pi = 0;
+    let di = 0;
+    return list.map(s => {
+      if (s.kind === "pickup") {
+        pi += 1;
+        return { ...s, index: pi, label: pickupLabel(count, pi) };
+      }
+      if (s.kind === "dropoff") {
+        di += 1;
+        return { ...s, index: di, label: dropoffLabel(count, di) };
+      }
+      return { ...s };
+    });
+  };
+  const getCancelPlan = (stops) => {
+    const list = sanitizeStops(stops);
+    const step = getNextOrderStep(list);
+    const target = step?.stop || null;
+    if (!target) return { canContinue: false, remainingStops: [], cancelledStops: list, remainingOrderType: "single", targetLabel: "注文" };
+
+    const removeIds = new Set([target.id]);
+    const linked = list.find(s => s.kind !== target.kind && s.index === target.index);
+    if (linked) removeIds.add(linked.id);
+
+    const cancelledStops = relabelStops(list.filter(s => removeIds.has(s.id)));
+    const remainingStops = relabelStops(list.filter(s => !removeIds.has(s.id)));
+    const remainingCount = Math.max(
+      remainingStops.filter(s => s.kind === "pickup").length,
+      remainingStops.filter(s => s.kind === "dropoff").length,
+      0
+    );
+    return {
+      canContinue: remainingCount > 0,
+      remainingStops,
+      cancelledStops,
+      remainingOrderType: orderTypeFromCount(remainingCount || 1),
+      targetLabel: target.label || (target.kind === "pickup" ? "店舗" : "配達"),
+    };
+  };
+  const keepCurrentOrderWithStops = (d, stops) => {
+    const nextStops = relabelStops(stops);
+    if (!nextStops.length) {
+      clearCurrentOrder(d);
+      return;
+    }
+    const firstPickup = firstPickupStop(nextStops);
+    d.currentStops = nextStops;
+    d.currentStoreArrivalTime = firstPickup?.arrivalTime || null;
+    d.currentStoreDepartTime = firstPickup?.departTime || null;
+    d.currentStorePos = firstPickup?.lat && firstPickup?.lng ? { lat: firstPickup.lat, lng: firstPickup.lng } : null;
+    d.currentStoreWeather = firstPickup?.weather || null;
+    d.currentOrderType = orderTypeFromCount(Math.max(
+      nextStops.filter(s => s.kind === "pickup").length,
+      nextStops.filter(s => s.kind === "dropoff").length,
+      1
+    ));
+    d.currentAddedOrderCount = nextStops.filter(s => s.kind === "pickup" && s.source === "added_during_delivery").length;
+  };
 
   // ─── Computed ───
   const isOn = !!data.currentSessionStart; const isBrk = !!data.currentBreakStart; const hasOrd = !!data.currentOrderTime; const isJz = !!data.currentJizoStart;
@@ -1921,7 +1988,9 @@ export default function App() {
   const [rwSaving, setRwSaving] = useState(false);
   const openCancel = (type) => {
     if (!hasOrd) return;
+    const plan = getCancelPlan(data.currentStops);
     setCancelType(type);
+    setCancelMode(plan.canContinue ? "continue" : "finish");
     setRwCo(null);
     setScreen("cancel");
   };
@@ -1933,22 +2002,28 @@ export default function App() {
       const nowCancel = Date.now();
       const sp = data.currentOrderPos || null;
       const stops = sanitizeStops(data.currentStops);
-      const firstPickup = firstPickupStop(stops);
-      const storePos = data.currentStorePos || (cancelType === "store_wait" ? endPos : null);
+      const plan = getCancelPlan(stops);
+      const shouldContinue = cancelMode === "continue" && plan.canContinue;
+      const recordStops = shouldContinue ? plan.cancelledStops : stops;
+      const firstPickup = firstPickupStop(recordStops) || firstPickupStop(stops);
+      const dropoffStop = recordStops.find(s => s.kind === "dropoff") || null;
+      const storePos = firstPickup?.lat && firstPickup?.lng
+        ? { lat: firstPickup.lat, lng: firstPickup.lng }
+        : data.currentStorePos || (cancelType === "store_wait" ? endPos : null);
       const orderDate = data.currentOrderTime ? toLD(data.currentOrderTime) : tds();
       const isCrossDay = orderDate !== data.date;
       const deliveryObj = {
         orderTime: data.currentOrderTime, completeTime: nowCancel, company: rwCo,
-        reward: 0, incentive: 0, orderType: data.currentOrderType || "single", cancelled: true, cancelType, rating: null,
-        storeArrivalTime: cancelType === "store_wait" ? (data.currentStoreArrivalTime || firstPickup?.arrivalTime || null) : null,
-        storeDepartTime: null,
+        reward: 0, incentive: 0, orderType: shouldContinue ? "single" : (data.currentOrderType || "single"), cancelled: true, cancelType, rating: null,
+        storeArrivalTime: cancelType === "before_store" ? null : (firstPickup?.arrivalTime || data.currentStoreArrivalTime || null),
+        storeDepartTime: cancelType === "dropoff" ? (firstPickup?.departTime || data.currentStoreDepartTime || null) : null,
         startLat: sp?.lat || null, startLng: sp?.lng || null,
         storeLat: storePos?.lat || firstPickup?.lat || null, storeLng: storePos?.lng || firstPickup?.lng || null,
-        endLat: endPos?.lat || null, endLng: endPos?.lng || null,
+        endLat: dropoffStop?.lat || endPos?.lat || null, endLng: dropoffStop?.lng || endPos?.lng || null,
         apiWeather: data.currentOrderWeather || null,
         storeWeather: data.currentStoreWeather || firstPickup?.weather || null,
-        stops,
-        addedOrderCount: data.currentAddedOrderCount || 0,
+        stops: recordStops,
+        addedOrderCount: shouldContinue ? 0 : (data.currentAddedOrderCount || 0),
         areaName: null, memo: "",
       };
       if (isCrossDay) {
@@ -1959,12 +2034,14 @@ export default function App() {
           setAllLogs(prev => prev.map(l => l.date === orderDate ? { ...prevLog } : l));
         }
         update(d => {
-          clearCurrentOrder(d);
+          if (shouldContinue) keepCurrentOrderWithStops(d, plan.remainingStops);
+          else clearCurrentOrder(d);
         });
       } else {
         update(d => {
           d.deliveries.push(deliveryObj);
-          clearCurrentOrder(d);
+          if (shouldContinue) keepCurrentOrderWithStops(d, plan.remainingStops);
+          else clearCurrentOrder(d);
         });
       }
       setScreen("main");
@@ -1973,6 +2050,7 @@ export default function App() {
     } finally {
       setRwSaving(false);
       setCancelType(null);
+      setCancelMode("finish");
     }
   };
   const doRwOk = async () => {
@@ -2401,23 +2479,40 @@ export default function App() {
   // ═══ CANCEL ORDER ═══
   if (screen === "cancel") {
     const isStoreWaitCancel = cancelType === "store_wait";
-    const title = isStoreWaitCancel ? "調理待ちキャンセル" : "店舗未到着キャンセル";
-    const desc = isStoreWaitCancel
-      ? "店舗到着後のキャンセルとして記録します。店舗待機マップの対象になります。"
-      : "店舗に着く前のキャンセルとして記録します。店舗待機マップには載せません。";
+    const isDropoffCancel = cancelType === "dropoff";
+    const cancelPlan = getCancelPlan(data.currentStops);
+    const canContinueCancel = cancelPlan.canContinue;
+    const cancelPickup = firstPickupStop(cancelPlan.cancelledStops);
+    const cancelWaitStart = cancelPickup?.arrivalTime || data.currentStoreArrivalTime;
+    const title = cancelTypeLabel(cancelType);
+    const desc = isDropoffCancel
+      ? "配達中のキャンセルとして記録します。残りの配達がある場合は続行できます。"
+      : isStoreWaitCancel
+        ? "店舗到着後のキャンセルとして記録します。店舗待機マップの対象になります。"
+        : "店舗に着く前のキャンセルとして記録します。店舗待機マップには載せません。";
     return (<div style={ov}>
-      <div style={{ fontSize: sz(14), color: isStoreWaitCancel ? "#EF4444" : T.textMuted, marginBottom: 6, letterSpacing: 2, fontWeight: 700 }}>{title}</div>
+      <div style={{ fontSize: sz(14), color: "#EF4444", marginBottom: 6, letterSpacing: 2, fontWeight: 700 }}>{title}</div>
       <div style={{ fontSize: sz(12), color: T.textMuted, lineHeight: 1.6, textAlign: "center", maxWidth: 320, marginBottom: 16, padding: "0 14px" }}>{desc}</div>
-      <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>{COS.map(c => <button key={c.id} style={cB(c.bg, rwCo === c.id)} onClick={() => setRwCo(c.id)}>{c.letter}</button>)}</div>
-      <div style={{ fontSize: sz(11), color: T.textMuted, marginBottom: 18, height: 14 }}>{rwCo ? COS.find(c => c.id === rwCo)?.name : "会社を選択"}</div>
-      {isStoreWaitCancel && data.currentStoreArrivalTime && (
-        <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: "12px 16px", width: "100%", maxWidth: 300, marginBottom: 16, textAlign: "center" }}>
-          <div style={{ fontSize: sz(10), color: T.textDim, marginBottom: 4 }}>店舗待機時間</div>
-          <div style={{ fontSize: sz(22), fontWeight: 800, color: "#EF4444" }}>{fm(Date.now() - data.currentStoreArrivalTime)}</div>
+      {canContinueCancel && (
+        <div style={{ width: "100%", maxWidth: 300, background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: 6, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 14 }}>
+          {[
+            ["continue", "1件だけ"],
+            ["finish", "全部終了"],
+          ].map(([mode, label]) => (
+            <button key={mode} onClick={() => setCancelMode(mode)} style={{ height: 38, borderRadius: 9, border: "none", background: cancelMode === mode ? T.accent : "transparent", color: cancelMode === mode ? "#000" : T.textMuted, fontSize: sz(12), fontWeight: 800, cursor: "pointer", fontFamily: FN }}>{label}</button>
+          ))}
         </div>
       )}
-      <button style={okBt(!rwCo || rwSaving)} onClick={doCancelOk} disabled={!rwCo || rwSaving}>{rwSaving ? "保存中..." : "キャンセルを記録"}</button>
-      <button style={canB} onClick={() => { setCancelType(null); setScreen("main"); }}>戻る</button>
+      <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>{COS.map(c => <button key={c.id} style={cB(c.bg, rwCo === c.id)} onClick={() => setRwCo(c.id)}>{c.letter}</button>)}</div>
+      <div style={{ fontSize: sz(11), color: T.textMuted, marginBottom: 18, height: 14 }}>{rwCo ? COS.find(c => c.id === rwCo)?.name : "会社を選択"}</div>
+      {isStoreWaitCancel && cancelWaitStart && (
+        <div style={{ background: T.card, border: `1px solid ${T.border}`, borderRadius: 12, padding: "12px 16px", width: "100%", maxWidth: 300, marginBottom: 16, textAlign: "center" }}>
+          <div style={{ fontSize: sz(10), color: T.textDim, marginBottom: 4 }}>店舗待機時間</div>
+          <div style={{ fontSize: sz(22), fontWeight: 800, color: "#EF4444" }}>{fm(Date.now() - cancelWaitStart)}</div>
+        </div>
+      )}
+      <button style={okBt(!rwCo || rwSaving)} onClick={doCancelOk} disabled={!rwCo || rwSaving}>{rwSaving ? "保存中..." : (canContinueCancel && cancelMode === "continue" ? "記録して続ける" : "キャンセルを記録")}</button>
+      <button style={canB} onClick={() => { setCancelType(null); setCancelMode("finish"); setScreen("main"); }}>戻る</button>
     </div>);
   }
 
@@ -5367,7 +5462,7 @@ export default function App() {
                 <div style={{ width: 40, height: 40, borderRadius: 10, background: c?.bg || "#333", color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: sz(19), fontWeight: 800 }}>{c?.letter || "?"}</div>
                 <div>
                   <div style={{ fontSize: sz(15), fontWeight: 700, color: T.text }}>{c?.name || "不明"}</div>
-                  <div style={{ fontSize: sz(12), color: T.textMuted }}>{ot?.label || "シングル"}{d.cancelled && <span style={{ color: "#EF4444" }}> {d.cancelType === "before_store" ? "未到着キャンセル" : "調理待ちキャンセル"}</span>}</div>
+                  <div style={{ fontSize: sz(12), color: T.textMuted }}>{ot?.label || "シングル"}{d.cancelled && <span style={{ color: "#EF4444" }}> {cancelTypeLabel(d.cancelType)}</span>}</div>
                 </div>
               </div>
               <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span style={{ fontSize: sz(12), color: T.textMuted }}>日付</span><span style={{ fontSize: sz(14), fontWeight: 600, color: T.text }}>{histDetail.date}</span></div>
@@ -6185,6 +6280,7 @@ export default function App() {
             const canAddOrder = (data.currentStops || []).filter(s => s.kind === "pickup").length < 3;
             return (<>
               {canAddOrder && <button style={flashBtn("#0EA5E9", false, BBH, "order")} onClick={doAddOrderDuringDelivery}>受注追加</button>}
+              <button style={{ ...btn("#EF4444", false, BBH), fontSize: sz(13), letterSpacing: 0 }} onClick={() => openCancel("dropoff")}>キャンセル</button>
               <button style={flashBtn("#F59E0B", false, BBH, "complete")} onClick={doDropoffComplete}>{label}</button>
             </>);
           }
