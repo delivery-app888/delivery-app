@@ -2323,19 +2323,19 @@ export default function App() {
   const anaItems = [
     { key: "daily", label: "📋 今日どう動く", free: true },
     { key: "efficiency", label: "🎯 案件判断", free: true },
-    { key: "heatmap", label: "📍 受注エリア", free: true },
-    { key: "storewait", label: "🏪 店舗待機リスク", free: true },
-    { key: "hourwage", label: "🧭 稼働時間", free: false },
+    { key: "unitprice", label: "💰 単価詳細", free: true },
+    { key: "hourly", label: "⏰ 時間帯詳細", free: true },
     { key: "company", label: "🏢 会社別", free: true },
-    { key: "sales", label: "💴 売上集計", free: true },
+    { key: "heatmap", label: "📍 受注エリア", free: true },
     { key: "highvalue", label: "💎 高単価マップ", free: true },
+    { key: "storewait", label: "🏪 店舗待機リスク", free: true },
+    { key: "weekday", label: "📅 曜日詳細", free: true },
+    { key: "sales", label: "💴 売上集計", free: true },
+    { key: "hourwage", label: "🧭 稼働時間", free: false },
     { key: "area", label: "🗺️ エリア別", free: false },
     { key: "condition", label: "🌡️ 気象条件", free: false },
-    { key: "trends", label: "📈 推移・季節", free: false },
-    { key: "hourly", label: "⏰ 時間帯詳細", free: true },
-    { key: "weekday", label: "📅 曜日詳細", free: true },
     { key: "weather", label: "🌤️ 天候詳細", free: false },
-    { key: "unitprice", label: "💰 単価詳細", free: true },
+    { key: "trends", label: "📈 推移・季節", free: false },
   ];
   const MenuEl = menu && (
     <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 200 }} onClick={() => { setMenu(false); setAnaOpen(false); }}>
