@@ -99,8 +99,16 @@ export const ROCKET_BONUS_OPTIONS = [
   { rate: 30, label: "ゴールドプラス", sub: "30%" },
 ];
 
-export const calcRocketBonus = (totalReward, rate) => Math.round((Number(totalReward) || 0) * ((Number(rate) || 0) / 100));
-export const calcRocketBaseReward = (totalReward, rate) => Math.max(0, (Number(totalReward) || 0) - calcRocketBonus(totalReward, rate));
+export const calcRocketBaseReward = (totalReward, rate) => {
+  const total = Number(totalReward) || 0;
+  const bonusRate = Number(rate) || 0;
+  if (total <= 0 || bonusRate <= 0) return Math.max(0, total);
+  return Math.max(0, Math.round(total / (1 + bonusRate / 100)));
+};
+export const calcRocketBonus = (totalReward, rate) => {
+  const total = Number(totalReward) || 0;
+  return Math.max(0, total - calcRocketBaseReward(total, rate));
+};
 
 export const rocketEnteredTotal = (delivery) => {
   const rawReward = Number(delivery?.rawReward);
@@ -115,10 +123,13 @@ export const rocketManualIncentive = (delivery) => {
   if (delivery?.company !== "rocket" || rate <= 0 || enteredTotal <= 0) return incentive;
 
   const bonus = calcRocketBonus(enteredTotal, rate);
+  const oldTotalPercentBonus = Math.round(enteredTotal * (rate / 100));
   const reward = Number(delivery?.reward) || 0;
   const baseReward = calcRocketBaseReward(enteredTotal, rate);
-  if (bonus > 0 && reward === enteredTotal + bonus) return incentive;
+  if (oldTotalPercentBonus > 0 && reward === enteredTotal + oldTotalPercentBonus) return incentive;
+  if (oldTotalPercentBonus > 0 && reward === enteredTotal) return Math.max(0, incentive - oldTotalPercentBonus);
   if (bonus > 0 && (reward === enteredTotal || reward === baseReward)) return Math.max(0, incentive - bonus);
+  if (reward < enteredTotal) return Math.max(0, incentive - (enteredTotal - reward));
   return Math.max(0, incentive - bonus);
 };
 

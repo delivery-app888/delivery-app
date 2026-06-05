@@ -2902,7 +2902,7 @@ export default function App() {
         <div style={{ background: T.card, borderRadius: 14, padding: "4px 18px 14px", border: `1px solid ${T.border}`, marginBottom: 16 }}>
           <div style={{ fontSize: sz(12), color: T.textDim, fontWeight: 600, padding: "12px 0 4px", letterSpacing: 1 }}>報酬補正</div>
           <div style={{ fontSize: sz(14), fontWeight: 700, marginBottom: 4, color: T.text }}>Rocket Now 追加報酬</div>
-          <div style={{ fontSize: sz(11), color: T.textMuted, lineHeight: 1.6, marginBottom: 8 }}>配達完了時にRocket Nowを選択すると、入力金額に含まれる追加報酬分を計算し、インセンティブとして分けて記録します。</div>
+          <div style={{ fontSize: sz(11), color: T.textMuted, lineHeight: 1.6, marginBottom: 8 }}>配達完了時にRocket Nowを選択すると、入力金額を追加報酬込みの合計として元金額を逆算し、追加報酬分をインセンティブとして分けて記録します。</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8 }}>
             {ROCKET_BONUS_OPTIONS.map(opt => {
               const sel = (settings.rocketBonusRate || 0) === opt.rate;
