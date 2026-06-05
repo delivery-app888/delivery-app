@@ -90,12 +90,6 @@ export const newDay = () => ({
 });
 export const defaultSettings = () => ({ theme: "dark", incInGoal: true, incInReward: false, largeFont: false, workDays: [1, 2, 3, 4, 5], pickgoFeeRate: 15, rocketBonusRate: 0, autoOfflineHours: 0 });
 
-const rocketBonusBreakdown = (totalReward, rate) => {
-  const total = Number(totalReward) || 0;
-  const bonus = Math.round(total * ((Number(rate) || 0) / 100));
-  return { baseReward: Math.max(0, total - bonus), bonus };
-};
-
 export const migrate = (d) => {
   if (!d.deliveries) d.deliveries = [];
   if (!d.breaks) d.breaks = [];
@@ -143,17 +137,6 @@ export const migrate = (d) => {
       ? Math.floor(savedDeliveryCount)
       : inferredDeliveryCount;
     if (dl.rocketBonusRate === undefined) dl.rocketBonusRate = 0;
-    if (!dl.cancelled && dl.company === "rocket" && dl.rawReward && dl.rocketBonusRate > 0) {
-      const enteredTotal = Number(dl.rawReward) || 0;
-      const { baseReward, bonus } = rocketBonusBreakdown(enteredTotal, dl.rocketBonusRate);
-      const currentReward = Number(dl.reward) || 0;
-      if (bonus > 0 && currentReward === enteredTotal + bonus) {
-        dl.reward = baseReward;
-        dl.incentive = (dl.incentive || 0) + bonus;
-      } else if (bonus > 0 && currentReward === enteredTotal) {
-        dl.reward = baseReward;
-      }
-    }
     if (dl.apiWeather === undefined) dl.apiWeather = null; if (dl.storeWeather === undefined) dl.storeWeather = null; if (dl.areaName === undefined) dl.areaName = null; if (dl.memo === undefined) dl.memo = "";
   });
   if (d.currentOrderTime && d.currentStops.length === 0) {
