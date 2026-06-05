@@ -71,7 +71,15 @@ export const fetchWeather = async (lat, lng) => {
 export const ft = (ts) => { if (!ts) return "--:--"; const d = new Date(ts); return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; };
 export const fd = (m) => { if (!m || m <= 0) return "0分"; const h = Math.floor(m / 3600000); const mn = Math.floor((m % 3600000) / 60000); return h > 0 ? `${h}h${mn}m` : `${mn}分`; };
 export const fm = (m) => { if (!m || m <= 0) return "0分"; return `${Math.round(m / 60000)}分`; };
-export const dc = (d) => (OT.find(o => o.id === d.orderType)?.c || 1);
+export const dc = (d) => {
+  const savedCount = Number(d?.deliveryCount);
+  if (Number.isFinite(savedCount) && savedCount > 0) return Math.floor(savedCount);
+  const stops = Array.isArray(d?.stops) ? d.stops : [];
+  const pickupCount = stops.filter(s => s.kind === "pickup").length;
+  const dropoffCount = stops.filter(s => s.kind === "dropoff").length;
+  const stopCount = Math.max(pickupCount, dropoffCount);
+  return stopCount > 0 ? stopCount : (OT.find(o => o.id === d?.orderType)?.c || 1);
+};
 
 // ─── Data helpers ───
 export const newDay = () => ({
@@ -81,6 +89,12 @@ export const newDay = () => ({
   currentOrderType: null, currentStops: [], currentAddedOrderCount: 0,
 });
 export const defaultSettings = () => ({ theme: "dark", incInGoal: true, incInReward: false, largeFont: false, workDays: [1, 2, 3, 4, 5], pickgoFeeRate: 15, rocketBonusRate: 0, autoOfflineHours: 0 });
+
+const rocketBonusBreakdown = (totalReward, rate) => {
+  const total = Number(totalReward) || 0;
+  const bonus = Math.round(total * ((Number(rate) || 0) / 100));
+  return { baseReward: Math.max(0, total - bonus), bonus };
+};
 
 export const migrate = (d) => {
   if (!d.deliveries) d.deliveries = [];
@@ -108,7 +122,7 @@ export const migrate = (d) => {
     if (dl.stops.length > 0) {
       const pickups = dl.stops.filter(s => s.kind === "pickup");
       const dropoffs = dl.stops.filter(s => s.kind === "dropoff");
-      const count = Math.max(1, Math.min(3, Math.max(pickups.length, dropoffs.length)));
+      const count = Math.max(1, Math.max(pickups.length, dropoffs.length));
       let pi = 0, di = 0;
       dl.stops = dl.stops.map(s => {
         if (s.kind === "pickup") {
@@ -123,7 +137,23 @@ export const migrate = (d) => {
       });
     }
     if (dl.addedOrderCount === undefined) dl.addedOrderCount = 0;
+    const savedDeliveryCount = Number(dl.deliveryCount);
+    const inferredDeliveryCount = dc({ ...dl, deliveryCount: undefined });
+    dl.deliveryCount = Number.isFinite(savedDeliveryCount) && savedDeliveryCount > inferredDeliveryCount
+      ? Math.floor(savedDeliveryCount)
+      : inferredDeliveryCount;
     if (dl.rocketBonusRate === undefined) dl.rocketBonusRate = 0;
+    if (!dl.cancelled && dl.company === "rocket" && dl.rawReward && dl.rocketBonusRate > 0) {
+      const enteredTotal = Number(dl.rawReward) || 0;
+      const { baseReward, bonus } = rocketBonusBreakdown(enteredTotal, dl.rocketBonusRate);
+      const currentReward = Number(dl.reward) || 0;
+      if (bonus > 0 && currentReward === enteredTotal + bonus) {
+        dl.reward = baseReward;
+        dl.incentive = (dl.incentive || 0) + bonus;
+      } else if (bonus > 0 && currentReward === enteredTotal) {
+        dl.reward = baseReward;
+      }
+    }
     if (dl.apiWeather === undefined) dl.apiWeather = null; if (dl.storeWeather === undefined) dl.storeWeather = null; if (dl.areaName === undefined) dl.areaName = null; if (dl.memo === undefined) dl.memo = "";
   });
   if (d.currentOrderTime && d.currentStops.length === 0) {
@@ -137,7 +167,7 @@ export const migrate = (d) => {
   if (d.currentStops.length > 0) {
     const pickups = d.currentStops.filter(s => s.kind === "pickup");
     const dropoffs = d.currentStops.filter(s => s.kind === "dropoff");
-    const count = Math.max(1, Math.min(3, Math.max(pickups.length, dropoffs.length)));
+    const count = Math.max(1, Math.max(pickups.length, dropoffs.length));
     let pi = 0, di = 0;
     d.currentStops = d.currentStops.map(s => {
       if (s.kind === "pickup") {
