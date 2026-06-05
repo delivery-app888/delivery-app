@@ -5,7 +5,7 @@ import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { DARK, LIGHT } from "./themes";
 import { WEATHER, COS, OT, NP, FN, BH, BBH } from "./constants";
-import { tds, toLD, ms, sv, svByDate, lt, la, lg, sg, ls, ss, getPos, fetchWeather, ft, fd, fm, dc, newDay, defaultSettings, migrate, dayRev, reverseGeocode } from "./utils";
+import { tds, toLD, ms, sv, svByDate, lt, la, lg, sg, ls, ss, getPos, fetchWeather, ft, fd, fm, dc, newDay, defaultSettings, migrate, dayRev, reverseGeocode, ROCKET_BONUS_OPTIONS, calcRocketBonus, calcRocketBaseReward, rocketEnteredTotal, applyRocketBonusRate } from "./utils";
 import { generateDemoLogs } from "./demoData";
 
 // ─── AutoFitText ───
@@ -911,8 +911,6 @@ export default function App() {
     return Math.max(1, pickupCount, dropoffCount, orderTypeCount(fallbackType));
   };
   const orderTypeText = (type) => OT.find(o => o.id === type)?.label || "シングル";
-  const calcRocketBonus = (baseReward, rate) => Math.round((Number(baseReward) || 0) * ((Number(rate) || 0) / 100));
-  const calcRocketBaseReward = (totalReward, rate) => Math.max(0, (Number(totalReward) || 0) - calcRocketBonus(totalReward, rate));
   const deliverySummaryText = (delivery) => {
     const count = dc(delivery);
     const initial = orderTypeText(delivery?.orderType);
@@ -2557,6 +2555,13 @@ export default function App() {
   // ═══ EDIT ═══
   if (screen === "edit" && editData) {
     const c = COS.find(cc => cc.id === editData.company);
+    const isRocketEdit = editData.company === "rocket" && !editData.cancelled;
+    const editRocketTotal = isRocketEdit ? rocketEnteredTotal(editData) : 0;
+    const editRocketBonus = isRocketEdit ? calcRocketBonus(editRocketTotal, editData.rocketBonusRate || 0) : 0;
+    const editRocketOpt = ROCKET_BONUS_OPTIONS.find(opt => opt.rate === (editData.rocketBonusRate || 0)) || ROCKET_BONUS_OPTIONS[0];
+    const setEditRocketBonusRate = (rate) => {
+      setEditData(applyRocketBonusRate({ ...editData, company: "rocket" }, rate));
+    };
     const setEditTime = (field, value, fallbackTs) => {
       const withSyncedFirstStop = (next) => {
         if (!Array.isArray(next.stops) || !["storeArrivalTime", "storeDepartTime"].includes(field)) return next;
@@ -2779,7 +2784,38 @@ export default function App() {
           })()}
           <div onClick={() => setEditField("reward")} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}`, cursor: "pointer" }}><span style={{ fontSize: sz(13), color: T.textMuted }}>配達報酬</span><span style={{ fontSize: sz(17), fontWeight: 700, color: T.accent }}>¥{(editData.reward || 0).toLocaleString()} ✎</span></div>
           {editData.rawReward && editData.company === "pickgo" && <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0 7px" }}><span style={{ fontSize: sz(11), color: T.textDim }}>PickGo 入力金額</span><span style={{ fontSize: sz(13), color: T.textMuted }}>¥{editData.rawReward.toLocaleString()}（手数料{Math.round((1 - editData.reward / editData.rawReward) * 100)}%引き）</span></div>}
-          {editData.rawReward && editData.company === "rocket" && editData.rocketBonusRate > 0 && <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0 7px" }}><span style={{ fontSize: sz(11), color: T.textDim }}>Rocket Now 追加インセ</span><span style={{ fontSize: sz(13), color: T.textMuted }}>¥{calcRocketBonus(editData.rawReward, editData.rocketBonusRate).toLocaleString()}（入力 ¥{editData.rawReward.toLocaleString()}）</span></div>}
+          {isRocketEdit && (
+            <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginTop: 4, marginBottom: 4 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                <span style={{ fontSize: sz(12), color: T.textMuted }}>Rocket Now 追加報酬率</span>
+                <span style={{ fontSize: sz(12), color: T.accent, fontWeight: 800 }}>{editRocketOpt.label} {editRocketOpt.sub}</span>
+              </div>
+              {editRocketTotal > 0 && (
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 7 }}>
+                  <span style={{ fontSize: sz(11), color: T.textDim }}>入力 ¥{editRocketTotal.toLocaleString()}</span>
+                  <span style={{ fontSize: sz(11), color: T.purple, fontWeight: 800 }}>追加 ¥{editRocketBonus.toLocaleString()}</span>
+                </div>
+              )}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+                {ROCKET_BONUS_OPTIONS.map(opt => {
+                  const sel = (editData.rocketBonusRate || 0) === opt.rate;
+                  return (
+                    <button key={opt.rate} onClick={() => setEditRocketBonusRate(opt.rate)} style={{
+                      padding: "7px 3px", borderRadius: 8,
+                      border: sel ? `2px solid ${T.accent}` : `1px solid ${T.borderLight}`,
+                      background: sel ? `${T.accent}22` : T.inputBg,
+                      color: sel ? T.accent : T.textMuted,
+                      cursor: "pointer", fontFamily: FN,
+                      display: "flex", flexDirection: "column", alignItems: "center", gap: 1,
+                    }}>
+                      <span style={{ fontSize: sz(opt.rate === 0 ? 10 : 11), fontWeight: 800, whiteSpace: "nowrap" }}>{opt.rate === 30 ? "ゴールド+" : opt.label}</span>
+                      <span style={{ fontSize: sz(10), fontWeight: 700, color: sel ? T.accent : T.textDim }}>{opt.sub}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
           <div onClick={() => setEditField("incentive")} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: `1px solid ${T.border}`, cursor: "pointer" }}><span style={{ fontSize: sz(13), color: T.textMuted }}>インセンティブ</span><span style={{ fontSize: sz(17), fontWeight: 700, color: T.purple }}>¥{(editData.incentive || 0).toLocaleString()} ✎</span></div>
           <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8 }}><div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 5 }}>会社</div><div style={{ display: "flex", gap: 7 }}>{COS.map(cc => (<button key={cc.id} onClick={() => setEditData({ ...editData, company: cc.id })} style={{ width: 40, height: 40, borderRadius: 10, border: editData.company === cc.id ? `2px solid ${T.text}` : `1.5px solid ${T.borderLight}`, background: editData.company === cc.id ? T.inputBg : cc.bg, color: "#FFF", fontSize: sz(16), fontWeight: 800, cursor: "pointer", fontFamily: FN }}>{cc.letter}</button>))}</div></div>
           <div style={{ borderTop: `1px solid ${T.border}`, paddingTop: 8, marginTop: 8 }}><div style={{ fontSize: sz(12), color: T.textMuted, marginBottom: 5 }}>初期受注</div><div style={{ display: "flex", gap: 6 }}>{OT.map(ot => (<button key={ot.id} onClick={() => setEditOrderType(ot.id)} style={{ flex: 1, padding: "6px 0", borderRadius: 7, border: editData.orderType === ot.id ? `2px solid ${T.accent}` : `1.5px solid ${T.borderLight}`, background: editData.orderType === ot.id ? `${T.accent}20` : T.card, color: editData.orderType === ot.id ? T.accent : T.textMuted, fontSize: sz(12), fontWeight: 600, cursor: "pointer", fontFamily: FN }}>{ot.label}</button>))}</div></div>
@@ -2868,14 +2904,7 @@ export default function App() {
           <div style={{ fontSize: sz(14), fontWeight: 700, marginBottom: 4, color: T.text }}>Rocket Now 追加報酬</div>
           <div style={{ fontSize: sz(11), color: T.textMuted, lineHeight: 1.6, marginBottom: 8 }}>配達完了時にRocket Nowを選択すると、入力金額に含まれる追加報酬分を計算し、インセンティブとして分けて記録します。</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8 }}>
-            {[
-              { rate: 0, label: "追加報酬なし", sub: "0%" },
-              { rate: 10, label: "グリーン", sub: "10%" },
-              { rate: 15, label: "ブルー", sub: "15%" },
-              { rate: 20, label: "パープル", sub: "20%" },
-              { rate: 25, label: "ゴールド", sub: "25%" },
-              { rate: 30, label: "ゴールドプラス", sub: "30%" },
-            ].map(opt => {
+            {ROCKET_BONUS_OPTIONS.map(opt => {
               const sel = (settings.rocketBonusRate || 0) === opt.rate;
               return (
                 <button key={opt.rate} onClick={() => updateSettings({ rocketBonusRate: opt.rate })} style={{

@@ -90,6 +90,52 @@ export const newDay = () => ({
 });
 export const defaultSettings = () => ({ theme: "dark", incInGoal: true, incInReward: false, largeFont: false, workDays: [1, 2, 3, 4, 5], pickgoFeeRate: 15, rocketBonusRate: 0, autoOfflineHours: 0 });
 
+export const ROCKET_BONUS_OPTIONS = [
+  { rate: 0, label: "追加報酬なし", sub: "0%" },
+  { rate: 10, label: "グリーン", sub: "10%" },
+  { rate: 15, label: "ブルー", sub: "15%" },
+  { rate: 20, label: "パープル", sub: "20%" },
+  { rate: 25, label: "ゴールド", sub: "25%" },
+  { rate: 30, label: "ゴールドプラス", sub: "30%" },
+];
+
+export const calcRocketBonus = (totalReward, rate) => Math.round((Number(totalReward) || 0) * ((Number(rate) || 0) / 100));
+export const calcRocketBaseReward = (totalReward, rate) => Math.max(0, (Number(totalReward) || 0) - calcRocketBonus(totalReward, rate));
+
+export const rocketEnteredTotal = (delivery) => {
+  const rawReward = Number(delivery?.rawReward);
+  if (Number.isFinite(rawReward) && rawReward > 0) return rawReward;
+  return Number(delivery?.reward) || 0;
+};
+
+export const rocketManualIncentive = (delivery) => {
+  const incentive = Number(delivery?.incentive) || 0;
+  const rate = Number(delivery?.rocketBonusRate) || 0;
+  const enteredTotal = Number(delivery?.rawReward) || 0;
+  if (delivery?.company !== "rocket" || rate <= 0 || enteredTotal <= 0) return incentive;
+
+  const bonus = calcRocketBonus(enteredTotal, rate);
+  const reward = Number(delivery?.reward) || 0;
+  const baseReward = calcRocketBaseReward(enteredTotal, rate);
+  if (bonus > 0 && reward === enteredTotal + bonus) return incentive;
+  if (bonus > 0 && (reward === enteredTotal || reward === baseReward)) return Math.max(0, incentive - bonus);
+  return Math.max(0, incentive - bonus);
+};
+
+export const applyRocketBonusRate = (delivery, rate) => {
+  const nextRate = Math.max(0, Number(rate) || 0);
+  const enteredTotal = rocketEnteredTotal(delivery);
+  const manualIncentive = rocketManualIncentive(delivery);
+  const bonus = calcRocketBonus(enteredTotal, nextRate);
+  return {
+    ...delivery,
+    reward: nextRate > 0 ? calcRocketBaseReward(enteredTotal, nextRate) : enteredTotal,
+    rawReward: nextRate > 0 && enteredTotal > 0 ? enteredTotal : undefined,
+    rocketBonusRate: nextRate,
+    incentive: manualIncentive + bonus,
+  };
+};
+
 export const migrate = (d) => {
   if (!d.deliveries) d.deliveries = [];
   if (!d.breaks) d.breaks = [];
