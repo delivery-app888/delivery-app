@@ -7,6 +7,7 @@ import { DARK, LIGHT } from "./themes";
 import { WEATHER, COS, OT, NP, FN, BH, BBH } from "./constants";
 import { tds, toLD, ms, sv, svByDate, lt, la, lg, sg, ls, ss, getPos, fetchWeather, ft, fd, fm, dc, newDay, defaultSettings, migrate, dayRev, reverseGeocode, ROCKET_BONUS_OPTIONS, calcRocketBonus, calcRocketBaseReward, rocketEnteredTotal, applyRocketBonusRate } from "./utils";
 import { generateDemoLogs } from "./demoData";
+import { syncEditedDeliveryTimeToStops } from "./deliveryEdit";
 
 // ─── AutoFitText ───
 function AutoFitText({ value, maxSize = 20, color = "#FFF" }) {
@@ -2563,26 +2564,14 @@ export default function App() {
       setEditData(applyRocketBonusRate({ ...editData, company: "rocket" }, rate));
     };
     const setEditTime = (field, value, fallbackTs) => {
-      const withSyncedFirstStop = (next) => {
-        if (!Array.isArray(next.stops) || !["storeArrivalTime", "storeDepartTime"].includes(field)) return next;
-        let synced = false;
-        return {
-          ...next,
-          stops: next.stops.map(s => {
-            if (synced || s.kind !== "pickup") return s;
-            synced = true;
-            return { ...s, arrivalTime: next.storeArrivalTime || null, departTime: next.storeDepartTime || null };
-          }),
-        };
-      };
       if (!value) {
-        setEditData(withSyncedFirstStop({ ...editData, [field]: null }));
+        setEditData(syncEditedDeliveryTimeToStops({ ...editData, [field]: null }, field));
         return;
       }
       const [h, m] = value.split(":").map(Number);
       const base = new Date(editData[field] || fallbackTs || editData.orderTime || editData.completeTime || Date.now());
       base.setHours(h, m, 0, 0);
-      setEditData(withSyncedFirstStop({ ...editData, [field]: base.getTime() }));
+      setEditData(syncEditedDeliveryTimeToStops({ ...editData, [field]: base.getTime() }, field));
     };
     const storeWaitMsForEdit = () => editData.storeArrivalTime ? Math.max(0, (editData.storeDepartTime || editData.completeTime || Date.now()) - editData.storeArrivalTime) : 0;
     const applyStoreWaitMinutes = (mins) => {
