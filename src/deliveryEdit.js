@@ -34,3 +34,27 @@ export const syncEditedDeliveryTimeToStops = (delivery, field) => {
 
   return next;
 };
+
+export const removeEditedDeliveryStop = (stops, stopId) => {
+  const list = (Array.isArray(stops) ? stops : []).map(s => ({ ...s }));
+  const target = list.find(s => s.id === stopId);
+  if (!target || !["pickup", "dropoff"].includes(target.kind)) {
+    return { changed: false, stops: list, deliveryCount: null };
+  }
+
+  const sameKindCount = list.filter(s => s.kind === target.kind).length;
+  if (sameKindCount <= 1) {
+    return { changed: false, stops: list, deliveryCount: sameKindCount || null };
+  }
+
+  const remaining = list.filter(s => s.id !== stopId);
+  const deliveryCount = Math.max(1, remaining.filter(s => s.kind === target.kind).length);
+  const pickups = remaining.filter(s => s.kind === "pickup").slice(0, deliveryCount);
+  const dropoffs = remaining.filter(s => s.kind === "dropoff").slice(0, deliveryCount);
+
+  return {
+    changed: true,
+    stops: [...pickups, ...dropoffs],
+    deliveryCount,
+  };
+};

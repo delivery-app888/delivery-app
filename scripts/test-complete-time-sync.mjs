@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { syncEditedDeliveryTimeToStops } from "../src/deliveryEdit.js";
+import { removeEditedDeliveryStop, syncEditedDeliveryTimeToStops } from "../src/deliveryEdit.js";
 
 const ts = (h, m) => new Date(2026, 5, 17, h, m, 0, 0).getTime();
 
@@ -53,4 +53,48 @@ const normalizedCompleteTime = (delivery) => {
   assert.equal(edited.stops[1].completeTime, ts(20, 30));
 }
 
-console.log("complete-time sync regression passed");
+{
+  const stops = [
+    { id: "pickup-1", kind: "pickup" },
+    { id: "pickup-2", kind: "pickup" },
+    { id: "pickup-3", kind: "pickup" },
+    { id: "dropoff-1", kind: "dropoff" },
+    { id: "dropoff-2", kind: "dropoff" },
+    { id: "dropoff-3", kind: "dropoff" },
+  ];
+  const result = removeEditedDeliveryStop(stops, "dropoff-3");
+
+  assert.equal(result.changed, true);
+  assert.equal(result.deliveryCount, 2);
+  assert.deepEqual(result.stops.map(s => s.id), ["pickup-1", "pickup-2", "dropoff-1", "dropoff-2"]);
+}
+
+{
+  const stops = [
+    { id: "pickup-1", kind: "pickup" },
+    { id: "pickup-2", kind: "pickup" },
+    { id: "pickup-3", kind: "pickup" },
+    { id: "dropoff-1", kind: "dropoff" },
+    { id: "dropoff-2", kind: "dropoff" },
+    { id: "dropoff-3", kind: "dropoff" },
+  ];
+  const result = removeEditedDeliveryStop(stops, "pickup-3");
+
+  assert.equal(result.changed, true);
+  assert.equal(result.deliveryCount, 2);
+  assert.deepEqual(result.stops.map(s => s.id), ["pickup-1", "pickup-2", "dropoff-1", "dropoff-2"]);
+}
+
+{
+  const stops = [
+    { id: "pickup-1", kind: "pickup" },
+    { id: "dropoff-1", kind: "dropoff" },
+    { id: "dropoff-2", kind: "dropoff" },
+  ];
+  const result = removeEditedDeliveryStop(stops, "pickup-1");
+
+  assert.equal(result.changed, false);
+  assert.deepEqual(result.stops.map(s => s.id), ["pickup-1", "dropoff-1", "dropoff-2"]);
+}
+
+console.log("delivery edit regression passed");

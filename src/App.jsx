@@ -7,7 +7,7 @@ import { DARK, LIGHT } from "./themes";
 import { WEATHER, COS, OT, NP, FN, BH, BBH } from "./constants";
 import { tds, toLD, ms, sv, svByDate, lt, la, lg, sg, ls, ss, getPos, fetchWeather, ft, fd, fm, dc, newDay, defaultSettings, migrate, dayRev, reverseGeocode, ROCKET_BONUS_OPTIONS, calcRocketBonus, calcRocketBaseReward, rocketEnteredTotal, applyRocketBonusRate } from "./utils";
 import { generateDemoLogs } from "./demoData";
-import { syncEditedDeliveryTimeToStops } from "./deliveryEdit";
+import { removeEditedDeliveryStop, syncEditedDeliveryTimeToStops } from "./deliveryEdit";
 
 // Temporary test unlock: keep premium gates in place, but treat the user as paid.
 // Set this back to false when restoring the normal paid-only behavior.
@@ -2233,11 +2233,15 @@ export default function App() {
       setTimeout(() => setTodayGuide(null), 4000);
     }
   };
-  const normalizeDeliverySteps = (delivery) => {
+  const normalizeDeliverySteps = (delivery, options = {}) => {
+    const preserveDeliveryCount = options.preserveDeliveryCount !== false;
+    const fillMissingDropoffs = options.fillMissingDropoffs !== false;
     const base = { ...delivery };
     let stops = sanitizeStops(base.stops);
     if (stops.length === 0) {
-      const count = Math.max(1, Number(base.deliveryCount) || 0, orderTypeCount(base.orderType));
+      const savedCount = Number(base.deliveryCount);
+      const preservedCount = preserveDeliveryCount && Number.isFinite(savedCount) && savedCount > 0 ? Math.floor(savedCount) : 0;
+      const count = Math.max(1, preservedCount, orderTypeCount(base.orderType));
       const pickup = {
         id: "pickup-1", kind: "pickup", index: 1, label: pickupLabel(count, 1),
         arrivalTime: base.storeArrivalTime || null,
@@ -2256,10 +2260,12 @@ export default function App() {
     }
     const pickups = stops.filter(s => s.kind === "pickup");
     const dropoffs = stops.filter(s => s.kind === "dropoff");
-    const count = Math.max(1, Number(base.deliveryCount) || 0, Math.max(pickups.length, dropoffs.length));
+    const savedCount = Number(base.deliveryCount);
+    const preservedCount = preserveDeliveryCount && Number.isFinite(savedCount) && savedCount > 0 ? Math.floor(savedCount) : 0;
+    const count = Math.max(1, preservedCount, Math.max(pickups.length, dropoffs.length));
     const relabeledPickups = pickups.map((s, i) => ({ ...s, index: i + 1, label: pickupLabel(count, i + 1) }));
     let relabeledDropoffs = dropoffs.map((s, i) => ({ ...s, index: i + 1, label: dropoffLabel(count, i + 1) }));
-    while (relabeledDropoffs.length < count) {
+    while (fillMissingDropoffs && relabeledDropoffs.length < count) {
       const i = relabeledDropoffs.length;
       relabeledDropoffs.push({ id: `dropoff-${i + 1}`, kind: "dropoff", index: i + 1, label: dropoffLabel(count, i + 1), completeTime: null, lat: null, lng: null });
     }
@@ -2660,9 +2666,15 @@ export default function App() {
       }));
     };
     const deleteEditStop = (stopId) => {
-      const stops = sanitizeStops(editData.stops);
-      if (stops.length <= 2) return;
-      setEditData(normalizeDeliverySteps({ ...editData, stops: stops.filter(s => s.id !== stopId) }));
+      const normalized = normalizeDeliverySteps(editData);
+      const result = removeEditedDeliveryStop(normalized.stops, stopId);
+      if (!result.changed) return;
+      setEditData(normalizeDeliverySteps({
+        ...normalized,
+        deliveryCount: result.deliveryCount,
+        orderType: orderTypeFromCount(result.deliveryCount),
+        stops: result.stops,
+      }, { preserveDeliveryCount: false, fillMissingDropoffs: false }));
     };
     if (editField === "reward" || editField === "incentive") {
       const ev = editField === "reward" ? String(editData.reward || "") : String(editData.incentive || "");
