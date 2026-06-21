@@ -9,6 +9,11 @@ import { tds, toLD, ms, sv, svByDate, lt, la, lg, sg, ls, ss, getPos, fetchWeath
 import { generateDemoLogs } from "./demoData";
 import { syncEditedDeliveryTimeToStops } from "./deliveryEdit";
 
+// Temporary test unlock: keep premium gates in place, but treat the user as paid.
+// Set this back to false when restoring the normal paid-only behavior.
+const TEMP_PREMIUM_UNLOCK_FOR_TEST = true;
+const DEFAULT_ANALYSIS_PERIOD = TEMP_PREMIUM_UNLOCK_FOR_TEST ? "week" : "today";
+
 // ─── AutoFitText ───
 function AutoFitText({ value, maxSize = 20, color = "#FFF" }) {
   const ref = useRef(null);
@@ -75,12 +80,15 @@ export default function App() {
   const [avgPeriod, setAvgPeriod] = useState("all"); // today | week | month | all
   const [anaOpen, setAnaOpen] = useState(false);
   const [isPremium] = useState(() => (
-    import.meta.env.DEV &&
-    typeof window !== "undefined" &&
-    new URLSearchParams(window.location.search).get("premium") === "1"
+    TEMP_PREMIUM_UNLOCK_FOR_TEST ||
+    (
+      import.meta.env.DEV &&
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("premium") === "1"
+    )
   ));
   // heatmap
-  const [hmPeriod, setHmPeriod] = useState("today");
+  const [hmPeriod, setHmPeriod] = useState(DEFAULT_ANALYSIS_PERIOD);
   const [hmCenter, setHmCenter] = useState(null);
   const [hmPinCount, setHmPinCount] = useState(0);
   const [hmTimeSlot, setHmTimeSlot] = useState("all");
@@ -92,7 +100,7 @@ export default function App() {
   const hmElRef = useRef(null);
   const hmLayerRef = useRef(null);
   // store wait map
-  const [swPeriod, setSwPeriod] = useState("today");
+  const [swPeriod, setSwPeriod] = useState(DEFAULT_ANALYSIS_PERIOD);
   const [swCenter, setSwCenter] = useState(null);
   const [swPinCount, setSwPinCount] = useState(0);
   const [swTimeSlot, setSwTimeSlot] = useState("all");
@@ -122,26 +130,26 @@ export default function App() {
   const hvElRef = useRef(null);
   const hvLayerRef = useRef(null);
   // hourly analysis
-  const [hrPeriod, setHrPeriod] = useState("today");
+  const [hrPeriod, setHrPeriod] = useState(DEFAULT_ANALYSIS_PERIOD);
   const [hrDow, setHrDow] = useState("all");
   const [hrCompany, setHrCompany] = useState("all");
   const [hrWeather, setHrWeather] = useState("all");
   const [hrDropdown, setHrDropdown] = useState(null);
   const [hwPeriod, setHwPeriod] = useState("month");
   // weekday analysis
-  const [wdPeriod, setWdPeriod] = useState("today");
+  const [wdPeriod, setWdPeriod] = useState(DEFAULT_ANALYSIS_PERIOD);
   const [wdTimeSlot, setWdTimeSlot] = useState("all");
   const [wdCompany, setWdCompany] = useState("all");
   const [wdWeather, setWdWeather] = useState("all");
   const [wdDropdown, setWdDropdown] = useState(null);
   // company analysis
-  const [coPeriod, setCoPeriod] = useState("today");
+  const [coPeriod, setCoPeriod] = useState(DEFAULT_ANALYSIS_PERIOD);
   const [coTimeSlot, setCoTimeSlot] = useState("all");
   const [coDow, setCoDow] = useState("all");
   const [coWeather, setCoWeather] = useState("all");
   const [coDropdown, setCoDropdown] = useState(null);
   // unit price analysis
-  const [upPeriod, setUpPeriod] = useState("today");
+  const [upPeriod, setUpPeriod] = useState(DEFAULT_ANALYSIS_PERIOD);
   const [upTimeSlot, setUpTimeSlot] = useState("all");
   const [upDow, setUpDow] = useState("all");
   const [upCompany, setUpCompany] = useState("all");
@@ -155,15 +163,15 @@ export default function App() {
   useEffect(() => {
     if (screen !== prevScreen.current) {
       if (screen === "ana_daily") { setDailyReportDate(tds()); }
-      if (screen === "ana_heatmap") { setHmCenter(null); getPos().then(p => { if (p) setHmCenter([p.lat, p.lng]); }); setHmPeriod("today"); setHmTimeSlot("all"); setHmDow("all"); setHmCompany("all"); setHmWeather("all"); setHmDropdown(null); }
-      if (screen === "ana_storewait") { setSwCenter(null); getPos().then(p => { if (p) setSwCenter([p.lat, p.lng]); }); setSwPeriod("today"); setSwTimeSlot("all"); setSwDow("all"); setSwCompany("all"); setSwWeather("all"); setSwDropdown(null); }
+      if (screen === "ana_heatmap") { setHmCenter(null); getPos().then(p => { if (p) setHmCenter([p.lat, p.lng]); }); setHmPeriod(DEFAULT_ANALYSIS_PERIOD); setHmTimeSlot("all"); setHmDow("all"); setHmCompany("all"); setHmWeather("all"); setHmDropdown(null); }
+      if (screen === "ana_storewait") { setSwCenter(null); getPos().then(p => { if (p) setSwCenter([p.lat, p.lng]); }); setSwPeriod(DEFAULT_ANALYSIS_PERIOD); setSwTimeSlot("all"); setSwDow("all"); setSwCompany("all"); setSwWeather("all"); setSwDropdown(null); }
       if (screen === "ana_area") { setAaCenter(null); getPos().then(p => { if (p) setAaCenter([p.lat, p.lng]); }); setAaPeriod("all"); setAaTimeSlot("all"); setAaDow("all"); setAaCompany("all"); setAaWeather("all"); setAaDropdown(null); }
       if (screen === "ana_highvalue") { setHvCenter(null); getPos().then(p => { if (p) setHvCenter([p.lat, p.lng]); }); }
-      if (screen === "ana_hourly") { setHrPeriod("today"); setHrDow("all"); setHrCompany("all"); setHrWeather("all"); setHrDropdown(null); }
+      if (screen === "ana_hourly") { setHrPeriod(DEFAULT_ANALYSIS_PERIOD); setHrDow("all"); setHrCompany("all"); setHrWeather("all"); setHrDropdown(null); }
       if (screen === "ana_hourwage") { setHwPeriod("month"); }
-      if (screen === "ana_weekday") { setWdPeriod("today"); setWdTimeSlot("all"); setWdCompany("all"); setWdWeather("all"); setWdDropdown(null); }
-      if (screen === "ana_company") { setCoPeriod("today"); setCoTimeSlot("all"); setCoDow("all"); setCoWeather("all"); setCoDropdown(null); }
-      if (screen === "ana_unitprice") { setUpPeriod("today"); setUpTimeSlot("all"); setUpDow("all"); setUpCompany("all"); setUpWeather("all"); setUpDropdown(null); }
+      if (screen === "ana_weekday") { setWdPeriod(DEFAULT_ANALYSIS_PERIOD); setWdTimeSlot("all"); setWdCompany("all"); setWdWeather("all"); setWdDropdown(null); }
+      if (screen === "ana_company") { setCoPeriod(DEFAULT_ANALYSIS_PERIOD); setCoTimeSlot("all"); setCoDow("all"); setCoWeather("all"); setCoDropdown(null); }
+      if (screen === "ana_unitprice") { setUpPeriod(DEFAULT_ANALYSIS_PERIOD); setUpTimeSlot("all"); setUpDow("all"); setUpCompany("all"); setUpWeather("all"); setUpDropdown(null); }
       if (screen === "ana_sales") { setSalesMode("month"); setSalesMonth(ms()); setSalesYear(String(new Date().getFullYear())); }
       if (screen === "history") { setHistDetail(null); setHistExpanded({}); setHistWorkEdit(null); setHistIncEdit(null); }
       prevScreen.current = screen;
