@@ -375,10 +375,6 @@ export default function App() {
     const item = { id, label, restoreScreen, data: cloneLog(data), createdAt: Date.now() };
     pendingUndoRef.current = item;
     setPendingUndo(item);
-    undoTimerRef.current = setTimeout(() => {
-      if (pendingUndoRef.current?.id === id) pendingUndoRef.current = null;
-      setPendingUndo(prev => prev?.id === id ? null : prev);
-    }, 5000);
     return id;
   }, [data]);
   useEffect(() => () => { if (undoTimerRef.current) clearTimeout(undoTimerRef.current); }, []);
