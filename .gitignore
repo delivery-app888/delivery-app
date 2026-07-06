@@ -3,3 +3,14 @@ dist
 .DS_Store
 *.local
 .env
+
+# my-context への symlink（リポジトリには含めない）
+ai-workflows.md
+chatgpt-tips.md
+elevenlabs-tips.md
+kling-tips.md
+midjourney-tips.md
+nanobanana-tips.md
+remotion-tips.md
+sns-marketing
+thinking-style.md
