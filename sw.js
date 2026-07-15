@@ -1,4 +1,4 @@
-const CACHE_NAME = 'delivery-log-v4';
+const CACHE_NAME = 'delivery-log-v6';
 const ASSETS = [
   './',
   './index.html',
