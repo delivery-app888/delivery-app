@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test:csv-backup": "node scripts/test-csv-backup.mjs",
     "test:complete-time": "node scripts/test-complete-time-sync.mjs",
     "build": "vite build",
     "preview": "vite preview"

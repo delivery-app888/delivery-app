@@ -87,4 +87,27 @@ export const storage = {
   },
 };
 
+// Restore multiple daily logs and their index as one atomic operation.
+// If any write fails, Dexie rolls the whole transaction back.
+export const restoreLogs = async (logs) => {
+  await ensureDB();
+  const rows = logs.map(log => ({ key: `log:${log.date}`, value: JSON.stringify(log) }));
+  const importedKeys = rows.map(row => row.key);
+
+  await db.transaction('rw', db.store, async () => {
+    const indexRow = await db.store.get('all-logs-index');
+    let indexedKeys = [];
+    try {
+      indexedKeys = indexRow ? JSON.parse(indexRow.value) : [];
+      if (!Array.isArray(indexedKeys)) indexedKeys = [];
+    } catch {
+      indexedKeys = [];
+    }
+    const storedLogKeys = await db.store.where('key').startsWith('log:').primaryKeys();
+    const nextKeys = [...new Set([...indexedKeys, ...storedLogKeys, ...importedKeys])].sort();
+    await db.store.bulkPut(rows);
+    await db.store.put({ key: 'all-logs-index', value: JSON.stringify(nextKeys) });
+  });
+};
+
 export default db;

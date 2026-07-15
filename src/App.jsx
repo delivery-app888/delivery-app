@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, LineChart, Line, CartesianGrid } from "recharts";
-import { storage, ensureDB } from "./db";
+import { storage, ensureDB, restoreLogs } from "./db";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { DARK, LIGHT } from "./themes";
@@ -8,6 +8,7 @@ import { WEATHER, COS, OT, NP, FN, BH, BBH } from "./constants";
 import { tds, toLD, ms, sv, svByDate, lt, la, lg, sg, ls, ss, getPos, fetchWeather, ft, fd, fm, dc, newDay, defaultSettings, migrate, dayRev, reverseGeocode, ROCKET_BONUS_OPTIONS, calcRocketBonus, calcRocketBaseReward, rocketEnteredTotal, applyRocketBonusRate } from "./utils";
 import { generateDemoLogs } from "./demoData";
 import { canEditDelivery, removeEditedDeliveryStop, syncEditedDeliveryTimeToStops } from "./deliveryEdit";
+import { CSV_BACKUP_VERSION, MAX_CSV_IMPORT_BYTES, parseDeliveryCsv } from "./csvBackup";
 
 // Temporary test unlock: keep premium gates in place, but treat the user as paid.
 // Set this back to false when restoring the normal paid-only behavior.
@@ -197,6 +198,9 @@ export default function App() {
   const [actionToast, setActionToast] = useState(null);
   const [pendingUndo, setPendingUndo] = useState(null);
   const [csvExport, setCsvExport] = useState(null);
+  const [csvImport, setCsvImport] = useState(null);
+  const [csvImportBusy, setCsvImportBusy] = useState(false);
+  const csvImportInputRef = useRef(null);
   const undoTimerRef = useRef(null);
   const undoSeqRef = useRef(0);
   const pendingUndoRef = useRef(null);
@@ -1189,7 +1193,8 @@ export default function App() {
       "duration_minutes", "online_minutes", "break_minutes", "jizo_minutes", "work_minutes", "delivery_count", "pickup_count", "dropoff_count", "pickup_wait_minutes_total", "pickup_wait_minutes_max", "added_order_count",
       "raw_reward", "reward", "incentive", "total_amount", "per_min", "rocket_bonus_rate",
       "start_lat", "start_lng", "store_lat", "store_lng", "end_lat", "end_lng",
-      "weather_source", "api_weather_id", "temperature", "windspeed", "precipitation", "precipitation_avg", "precipitation_max", "precipitation_samples", "rain_level", "area_name", "memo"
+      "weather_source", "api_weather_id", "temperature", "windspeed", "precipitation", "precipitation_avg", "precipitation_max", "precipitation_samples", "rain_level", "area_name", "memo",
+      "backup_version", "backup_json"
     ];
     const rows = [];
     const pushRow = (patch) => rows.push(Object.fromEntries(columns.map(c => [c, patch[c] ?? ""])));
@@ -1213,6 +1218,10 @@ export default function App() {
       const dailyIncentive = dailyIncentives.reduce((s, d) => s + (d.amount || 0), 0);
       const totalIncentive = deliveryIncentive + dailyIncentive;
       const workMs = Math.max(0, sessionMs - breakMs);
+      pushRow({
+        record_type: "backup_log", date: log.date,
+        backup_version: CSV_BACKUP_VERSION, backup_json: JSON.stringify(log),
+      });
       pushRow({
         record_type: "day_summary", date: log.date, manual_weather: log.weather,
         online_minutes: roundMin(sessionMs), break_minutes: roundMin(breakMs), jizo_minutes: roundMin(jizoMs), work_minutes: roundMin(workMs),
@@ -1331,6 +1340,83 @@ export default function App() {
       setTimeout(() => setActionToast(null), 1600);
     } catch {
       setPopup({ msg: "CSVの自動保存に失敗しました。\n設定画面下部のCSVテキストからコピーしてください。", onConfirm: () => setPopup(null) });
+    }
+  };
+
+  const selectCsvForRestore = async (event) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    if (file.size > MAX_CSV_IMPORT_BYTES) {
+      setCsvImport({ filename: file.name, error: "CSVが大きすぎます（20MBまで）" });
+      return;
+    }
+
+    try {
+      const parsed = parseDeliveryCsv(await file.text());
+      const existingDates = new Set([...allLogs, data].map(log => log?.date).filter(Boolean));
+      const dates = parsed.logs.map(log => log.date);
+      const overlapDates = dates.filter(date => existingDates.has(date));
+      const deliveryCount = parsed.logs.reduce((sum, log) => sum + (log.deliveries || []).length, 0);
+      const todayWillBeReplaced = dates.includes(tds());
+      const activeTodayWillBeReplaced = todayWillBeReplaced && !!(
+        data.currentSessionStart || data.currentBreakStart || data.currentJizoStart || data.currentOrderTime
+      );
+      setCsvImport({
+        ...parsed,
+        filename: file.name,
+        firstDate: dates[0],
+        lastDate: dates[dates.length - 1],
+        overlapDates,
+        deliveryCount,
+        activeTodayWillBeReplaced,
+        error: null,
+      });
+    } catch (error) {
+      setCsvImport({ filename: file.name, error: error?.message || "CSVを読み込めませんでした" });
+    }
+  };
+
+  const restoreCsvData = async () => {
+    if (!csvImport?.logs?.length || csvImportBusy) return;
+    setCsvImportBusy(true);
+    let restoreCommitted = false;
+    try {
+      clearPendingUndo();
+      if (saveRef.current) clearTimeout(saveRef.current);
+      saveRef.current = null;
+
+      const importedLogs = csvImport.logs.map(log => migrate(JSON.parse(JSON.stringify(log))));
+      const includesCurrentDate = importedLogs.some(log => log.date === data.date);
+      const logsToStore = includesCurrentDate
+        ? importedLogs
+        : [...importedLogs, migrate(JSON.parse(JSON.stringify(data)))];
+      await restoreLogs(logsToStore);
+      restoreCommitted = true;
+
+      const loadedLogs = (await la()).map(migrate);
+      const loadedDates = new Set(loadedLogs.map(log => log.date));
+      const missingDate = logsToStore.find(log => !loadedDates.has(log.date));
+      if (missingDate) throw new Error(`${missingDate.date}の保存確認に失敗しました`);
+
+      const today = tds();
+      const todayLog = loadedLogs.find(log => log.date === today);
+      if (todayLog) setData(todayLog);
+      setAllLogs(loadedLogs.filter(log => log.date !== today));
+      setCsvImport(null);
+      setActionToast(`✓ ${importedLogs.length}日分を復元しました`);
+      setTimeout(() => setActionToast(null), 2000);
+    } catch (error) {
+      if (!restoreCommitted) saveRef.current = setTimeout(() => sv(data), 300);
+      setCsvImport(current => ({
+        ...(current || {}),
+        error: restoreCommitted
+          ? `CSVは保存されましたが、保存後の確認に失敗しました。アプリを再起動して配達履歴を確認してください。\n${error?.message || ""}`
+          : `復元に失敗しました。CSVによる変更は反映されていません。\n${error?.message || "もう一度お試しください"}`,
+      }));
+    } finally {
+      setCsvImportBusy(false);
     }
   };
 
@@ -3106,6 +3192,74 @@ export default function App() {
               </div>
             </div>
           )}
+          <div style={{ marginTop: 14, borderTop: `1px solid ${T.border}`, paddingTop: 14 }}>
+            <div style={{ fontSize: sz(14), fontWeight: 600, color: T.text, marginBottom: 4 }}>CSVから復元</div>
+            <div style={{ fontSize: sz(11), color: T.textMuted, lineHeight: 1.6, marginBottom: 10 }}>
+              このアプリから保存したCSVを読み込みます。同じ日付のデータだけCSVの内容に置き換え、ほかの日付は残します。CSVは外部へ送信されません。
+            </div>
+            <input
+              ref={csvImportInputRef}
+              type="file"
+              accept=".csv,text/csv"
+              onChange={selectCsvForRestore}
+              style={{ display: "none" }}
+            />
+            <button
+              onClick={() => csvImportInputRef.current?.click()}
+              disabled={csvImportBusy}
+              style={{
+                width: "100%", height: 44, borderRadius: 10,
+                border: `1.5px solid ${T.accent}`, background: "none", color: T.accent,
+                fontSize: sz(14), fontWeight: 700, cursor: csvImportBusy ? "default" : "pointer",
+                fontFamily: FN, opacity: csvImportBusy ? 0.6 : 1,
+              }}
+            >{csvImportBusy ? "復元中..." : "CSVを選ぶ"}</button>
+
+            {csvImport && (
+              <div style={{ marginTop: 10, padding: 12, borderRadius: 10, background: T.inputBg, border: `1px solid ${csvImport.error ? "#EF4444" : T.borderLight}` }}>
+                <div style={{ fontSize: sz(11), color: T.textMuted, overflowWrap: "anywhere", marginBottom: csvImport.error ? 0 : 7 }}>
+                  {csvImport.filename}
+                </div>
+                {csvImport.error ? (
+                  <div style={{ fontSize: sz(11), color: "#EF4444", lineHeight: 1.6, whiteSpace: "pre-line" }}>{csvImport.error}</div>
+                ) : (
+                  <>
+                    <div style={{ fontSize: sz(12), color: T.text, lineHeight: 1.7 }}>
+                      {csvImport.logs.length}日分・配達{csvImport.deliveryCount}件<br/>
+                      期間: {csvImport.firstDate}{csvImport.firstDate !== csvImport.lastDate ? ` 〜 ${csvImport.lastDate}` : ""}
+                    </div>
+                    {csvImport.overlapDates.length > 0 && (
+                      <div style={{ fontSize: sz(11), color: "#F59E0B", lineHeight: 1.6, marginTop: 7 }}>
+                        同じ日付が{csvImport.overlapDates.length}日分あります。その日だけCSVの内容に置き換わります。
+                      </div>
+                    )}
+                    {csvImport.activeTodayWillBeReplaced && (
+                      <div style={{ fontSize: sz(11), color: "#EF4444", lineHeight: 1.6, marginTop: 7 }}>
+                        今日の進行中の記録もCSVの内容に置き換わります。
+                      </div>
+                    )}
+                    {csvImport.format !== "exact" && (
+                      <div style={{ fontSize: sz(11), color: T.textMuted, lineHeight: 1.6, marginTop: 7 }}>
+                        旧形式のCSVです。完了済みの配達・稼働・休憩などを復元しますが、受注途中など旧CSVに含まれていない状態は戻りません。
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                      <button
+                        onClick={() => setCsvImport(null)}
+                        disabled={csvImportBusy}
+                        style={{ flex: 1, height: 42, borderRadius: 9, border: `1px solid ${T.borderLight}`, background: "none", color: T.textMuted, fontSize: sz(12), fontWeight: 700, cursor: "pointer", fontFamily: FN }}
+                      >キャンセル</button>
+                      <button
+                        onClick={restoreCsvData}
+                        disabled={csvImportBusy}
+                        style={{ flex: 1.5, height: 42, borderRadius: 9, border: "none", background: T.accent, color: "#000", fontSize: sz(12), fontWeight: 800, cursor: csvImportBusy ? "default" : "pointer", fontFamily: FN, opacity: csvImportBusy ? 0.6 : 1 }}
+                      >{csvImportBusy ? "復元中..." : "この内容で復元"}</button>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
         </div>
         <div style={{ background: T.card, borderRadius: 14, padding: "12px 18px", border: `1px solid ${T.border}`, marginTop: 16 }}>
           <div style={{ fontSize: sz(12), color: "#EF4444", fontWeight: 600, marginBottom: 6 }}>データについて</div>
