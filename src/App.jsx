@@ -7,7 +7,7 @@ import { DARK, LIGHT } from "./themes";
 import { WEATHER, COS, OT, NP, FN, BH, BBH } from "./constants";
 import { tds, toLD, ms, sv, svByDate, lt, la, lg, sg, ls, ss, getPos, fetchWeather, ft, fd, fm, dc, newDay, defaultSettings, migrate, dayRev, reverseGeocode, ROCKET_BONUS_OPTIONS, calcRocketBonus, calcRocketBaseReward, rocketEnteredTotal, applyRocketBonusRate } from "./utils";
 import { generateDemoLogs } from "./demoData";
-import { removeEditedDeliveryStop, syncEditedDeliveryTimeToStops } from "./deliveryEdit";
+import { canEditDelivery, removeEditedDeliveryStop, syncEditedDeliveryTimeToStops } from "./deliveryEdit";
 
 // Temporary test unlock: keep premium gates in place, but treat the user as paid.
 // Set this back to false when restoring the normal paid-only behavior.
@@ -73,6 +73,8 @@ export default function App() {
   const [diCo, setDiCo] = useState(null); const [diAmt, setDiAmt] = useState("");
   // edit
   const [editIdx, setEditIdx] = useState(null); const [editData, setEditData] = useState(null); const [editField, setEditField] = useState(null);
+  const [editLogDate, setEditLogDate] = useState(null); const [editOriginalCompleteTime, setEditOriginalCompleteTime] = useState(null);
+  const [editReturnScreen, setEditReturnScreen] = useState("main");
   // modals
   const [popup, setPopup] = useState(null); const [weatherPop, setWeatherPop] = useState(false);
   const [tutorial, setTutorial] = useState(false); const [tutStep, setTutStep] = useState(0);
@@ -2284,9 +2286,61 @@ export default function App() {
       endLng: lastDropoff?.lng || base.endLng || null,
     };
   };
-  const openEdit = (i) => { setEditIdx(i); setEditData(normalizeDeliverySteps(data.deliveries[i])); setEditField(null); setScreen("edit"); };
-  const svEdit = () => { if (editIdx === null) return; const nextEdit = normalizeDeliverySteps(editData); update(d => { d.deliveries[editIdx] = nextEdit; }); setScreen("main"); };
-  const delEdit = () => { setPopup({ msg: "この記録を削除？", onConfirm: () => { update(d => { d.deliveries.splice(editIdx, 1); }); setPopup(null); setScreen("main"); } }); };
+  const openEdit = (i, logDate = data.date, returnScreen = "main") => {
+    const source = logDate === data.date ? data : allLogs.find(l => l.date === logDate);
+    const delivery = source?.deliveries?.[i];
+    if (!delivery || !canEditDelivery(delivery)) return;
+    setEditIdx(i);
+    setEditData(normalizeDeliverySteps(delivery));
+    setEditLogDate(logDate);
+    setEditOriginalCompleteTime(delivery.completeTime);
+    setEditReturnScreen(returnScreen);
+    setEditField(null);
+    setScreen("edit");
+  };
+  const editStillAllowed = () => canEditDelivery({ completeTime: editOriginalCompleteTime });
+  const svEdit = async () => {
+    if (editIdx === null || !editLogDate) return;
+    if (!editStillAllowed()) {
+      setPopup({ msg: "修正可能時間（配達完了から24時間）を過ぎています", onConfirm: () => setPopup(null) });
+      return;
+    }
+    const nextEdit = normalizeDeliverySteps(editData);
+    if (editLogDate === data.date) {
+      update(d => { d.deliveries[editIdx] = nextEdit; });
+    } else {
+      const log = allLogs.find(l => l.date === editLogDate);
+      if (!log) return;
+      const nextLog = { ...log, deliveries: [...(log.deliveries || [])] };
+      nextLog.deliveries[editIdx] = nextEdit;
+      await svByDate(editLogDate, nextLog);
+      setAllLogs(prev => prev.map(l => l.date === editLogDate ? nextLog : l));
+    }
+    setScreen(editReturnScreen);
+  };
+  const delEdit = () => {
+    if (!editStillAllowed()) {
+      setPopup({ msg: "修正可能時間（配達完了から24時間）を過ぎています", onConfirm: () => setPopup(null) });
+      return;
+    }
+    setPopup({
+      msg: "この記録を削除？",
+      onConfirm: async () => {
+        if (editLogDate === data.date) {
+          update(d => { d.deliveries.splice(editIdx, 1); });
+        } else {
+          const log = allLogs.find(l => l.date === editLogDate);
+          if (!log) return;
+          const nextLog = { ...log, deliveries: [...(log.deliveries || [])] };
+          nextLog.deliveries.splice(editIdx, 1);
+          await svByDate(editLogDate, nextLog);
+          setAllLogs(prev => prev.map(l => l.date === editLogDate ? nextLog : l));
+        }
+        setPopup(null);
+        setScreen(editReturnScreen);
+      },
+    });
+  };
   const doGoalSave = () => { const a = parseInt(goalInput, 10) || 0; setGoal(a); sg({ amount: a, month: ms() }); setGoalModal(false); };
 
   if (loading) return (
@@ -2876,7 +2930,7 @@ export default function App() {
         </div>
         <button onClick={svEdit} style={{ ...okBt(false), maxWidth: "100%", height: 46, marginBottom: 5 }}>保存</button>
         <button onClick={delEdit} style={{ width: "100%", height: 40, borderRadius: 10, border: "1.5px solid #EF444444", background: T.card, color: "#EF4444", fontSize: sz(13), fontWeight: 600, cursor: "pointer", fontFamily: FN }}>削除</button>
-        <button onClick={() => setScreen("main")} style={{ width: "100%", height: 36, borderRadius: 10, border: `1.5px solid ${T.borderLight}`, background: "none", color: T.textMuted, fontSize: sz(13), fontWeight: 600, cursor: "pointer", fontFamily: FN, marginTop: 3 }}>戻る</button>
+        <button onClick={() => setScreen(editReturnScreen)} style={{ width: "100%", height: 36, borderRadius: 10, border: `1.5px solid ${T.borderLight}`, background: "none", color: T.textMuted, fontSize: sz(13), fontWeight: 600, cursor: "pointer", fontFamily: FN, marginTop: 3 }}>戻る</button>
       </div>
     </div>);
   }
@@ -3889,7 +3943,7 @@ export default function App() {
         {coCanView ? (<>
           <div style={{ fontSize: sz(10), color: T.textDim, marginBottom: 8, textAlign: "right" }}>{coFiltered.length}件のデータ</div>
           <div style={aC}>
-            <div style={aT2}>売上シェア</div>
+            <div style={aT2}>基礎報酬シェア</div>
             <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
               <ResponsiveContainer width={140} height={140}>
                 <PieChart style={{ pointerEvents: "none" }}>
@@ -3911,7 +3965,7 @@ export default function App() {
             </div>
           </div>
           <div style={aC}>
-            <div style={aT2}>平均単価比較</div>
+            <div style={aT2}>平均単価（インセンティブ除外）</div>
             <ResponsiveContainer width="100%" height={160}>
               <BarChart data={coAvg} margin={{ top: 4, right: 4, bottom: 0, left: -10 }}>
                 <XAxis dataKey="name" tick={{ fontSize: sz(12), fill: T.textDim }} axisLine={false} tickLine={false} />
@@ -3926,11 +3980,11 @@ export default function App() {
         </>) : (
           <PremiumBlur>
             <div style={aC}>
-              <div style={aT2}>売上シェア</div>
+              <div style={aT2}>基礎報酬シェア</div>
               <div style={{ height: 140 }} />
             </div>
             <div style={aC}>
-              <div style={aT2}>平均単価比較</div>
+              <div style={aT2}>平均単価（インセンティブ除外）</div>
               <div style={{ height: 160 }} />
             </div>
           </PremiumBlur>
@@ -4270,7 +4324,7 @@ export default function App() {
           <div style={aC}>
             <div style={{ textAlign: "center", marginBottom: 14 }}>
               <div style={{ fontSize: sz(30), fontWeight: 800, color: T.accent }}>¥{pAvgAll.toLocaleString()}</div>
-              <div style={{ fontSize: sz(11), color: T.textDim }}>{pTot}件の平均</div>
+              <div style={{ fontSize: sz(11), color: T.textDim }}>{pTot}件の平均（インセンティブ除外）</div>
             </div>
             <ResponsiveContainer width="100%" height={160}>
               <BarChart data={pAvgs} margin={{ top: 4, right: 4, bottom: 0, left: -10 }}>
@@ -4299,7 +4353,7 @@ export default function App() {
             <div style={aC}>
               <div style={{ textAlign: "center", marginBottom: 14 }}>
                 <div style={{ fontSize: sz(30), fontWeight: 800, color: T.textDim }}>¥---</div>
-                <div style={{ fontSize: sz(11), color: T.textDim }}>---件の平均</div>
+                <div style={{ fontSize: sz(11), color: T.textDim }}>---件の平均（インセンティブ除外）</div>
               </div>
               <div style={{ height: 160 }} />
               <div style={{ height: 120 }} />
@@ -5737,7 +5791,7 @@ export default function App() {
                             const durMin = dur > 0 ? dur / 60000 : 0;
                             const perMin = durMin > 0 ? Math.round((d.reward || 0) / durMin) : 0;
                             return (
-                              <div key={i} onClick={() => setHistDetail({ delivery: d, date: log.date, delIdx: dels.length - 1 - i })} style={{ display: "flex", alignItems: "center", gap: 0, padding: "7px 0", borderBottom: i < dels.length - 1 ? `1px solid ${T.border}` : "none", cursor: "pointer" }}>
+                              <div key={i} onClick={() => { const delIdx = dels.length - 1 - i; if (canEditDelivery(d)) openEdit(delIdx, log.date, "history"); else setHistDetail({ delivery: d, date: log.date, delIdx }); }} style={{ display: "flex", alignItems: "center", gap: 0, padding: "7px 0", borderBottom: i < dels.length - 1 ? `1px solid ${T.border}` : "none", cursor: "pointer" }}>
                                 <div style={{ width: 28, height: 28, borderRadius: 7, background: d.cancelled ? T.textFaint : (c?.bg || "#333"), color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: sz(14), fontWeight: 700, flexShrink: 0, marginRight: 8 }}>{c?.letter || "?"}</div>
                                 <div style={{ flex: 1, minWidth: 0, marginRight: 6 }}>
                                   {d.cancelled ? <div style={{ fontSize: sz(12), color: "#EF4444", fontWeight: 600 }}>キャンセル</div> : (
@@ -6264,7 +6318,7 @@ export default function App() {
         {data.deliveries.length > 0 && (
           <div style={{ padding: "6px 16px 0" }}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-              <div style={{ fontSize: sz(10), color: T.textDim, letterSpacing: 1, fontWeight: 600 }}>本日の配達（タップで編集）</div>
+              <div style={{ fontSize: sz(10), color: T.textDim, letterSpacing: 1, fontWeight: 600 }}>本日の配達（完了後24時間以内は編集可）</div>
               <div style={{ fontSize: sz(10), color: T.textDim }}>{delCnt}件</div>
             </div>
             <div style={{ background: T.cardAlt, borderRadius: 12, border: `1px solid ${T.border}`, overflow: "hidden" }}>
@@ -6277,8 +6331,9 @@ export default function App() {
                   const dur = d.completeTime && d.orderTime ? d.completeTime - d.orderTime : 0;
                   const durMin = dur > 0 ? dur / 60000 : 0;
                   const perMin = durMin > 0 ? Math.round((d.reward || 0) / durMin) : 0;
+                  const editable = canEditDelivery(d);
                   return (
-                    <div key={i} onClick={() => { const canEdit = d.completeTime && (Date.now() - d.completeTime) <= 7200000 && new Date(d.completeTime).toDateString() === new Date().toDateString(); if (canEdit) openEdit(ri); }} style={{ display: "flex", alignItems: "center", gap: 0, padding: "7px 0", borderBottom: i < data.deliveries.length - 1 ? `1px solid ${T.border}` : "none", cursor: "pointer", opacity: d.completeTime && ((Date.now() - d.completeTime) > 7200000 || new Date(d.completeTime).toDateString() !== new Date().toDateString()) ? 0.6 : 1 }}>
+                    <div key={i} onClick={() => { if (editable) openEdit(ri); }} style={{ display: "flex", alignItems: "center", gap: 0, padding: "7px 0", borderBottom: i < data.deliveries.length - 1 ? `1px solid ${T.border}` : "none", cursor: editable ? "pointer" : "default", opacity: editable ? 1 : 0.6 }}>
                       <div style={{ width: 30, height: 30, borderRadius: 8, background: d.cancelled ? T.textFaint : (c?.bg || "#333"), color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center", fontSize: sz(15), fontWeight: 700, flexShrink: 0, marginRight: 8 }}>{c?.letter || "?"}</div>
                       <div style={{ flex: 1, minWidth: 0, marginRight: 6 }}>
                         {d.cancelled ? <div style={{ fontSize: sz(12), color: "#EF4444", fontWeight: 600 }}>キャンセル</div> : (

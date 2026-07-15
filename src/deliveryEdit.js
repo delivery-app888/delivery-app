@@ -1,3 +1,12 @@
+export const DELIVERY_EDIT_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+export const canEditDelivery = (delivery, now = Date.now()) => {
+  const completeTime = Number(delivery?.completeTime);
+  if (!Number.isFinite(completeTime) || completeTime <= 0) return false;
+  const elapsed = now - completeTime;
+  return elapsed >= 0 && elapsed <= DELIVERY_EDIT_WINDOW_MS;
+};
+
 export const syncEditedDeliveryTimeToStops = (delivery, field) => {
   const next = { ...delivery };
   if (!Array.isArray(next.stops)) return next;

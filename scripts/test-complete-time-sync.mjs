@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { removeEditedDeliveryStop, syncEditedDeliveryTimeToStops } from "../src/deliveryEdit.js";
+import { canEditDelivery, DELIVERY_EDIT_WINDOW_MS, removeEditedDeliveryStop, syncEditedDeliveryTimeToStops } from "../src/deliveryEdit.js";
 
 const ts = (h, m) => new Date(2026, 5, 17, h, m, 0, 0).getTime();
 
@@ -9,6 +9,17 @@ const normalizedCompleteTime = (delivery) => {
   const lastDropoff = completedDropoffs[completedDropoffs.length - 1] || dropoffs[dropoffs.length - 1] || null;
   return lastDropoff?.completeTime || delivery.completeTime || null;
 };
+
+{
+  const completedBeforeMidnight = new Date(2026, 5, 17, 23, 30, 0, 0).getTime();
+  const afterMidnight = new Date(2026, 5, 18, 0, 30, 0, 0).getTime();
+  assert.equal(DELIVERY_EDIT_WINDOW_MS, 24 * 60 * 60 * 1000);
+  assert.equal(canEditDelivery({ completeTime: completedBeforeMidnight }, afterMidnight), true);
+  assert.equal(canEditDelivery({ completeTime: completedBeforeMidnight }, completedBeforeMidnight + DELIVERY_EDIT_WINDOW_MS), true);
+  assert.equal(canEditDelivery({ completeTime: completedBeforeMidnight }, completedBeforeMidnight + DELIVERY_EDIT_WINDOW_MS + 1), false);
+  assert.equal(canEditDelivery({ completeTime: completedBeforeMidnight }, completedBeforeMidnight - 1), false);
+  assert.equal(canEditDelivery({}, afterMidnight), false);
+}
 
 {
   const edited = syncEditedDeliveryTimeToStops({
